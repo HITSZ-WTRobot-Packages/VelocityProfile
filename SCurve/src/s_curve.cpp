@@ -118,7 +118,7 @@ float SCurveProfile::SCurveAccel::getAcceleration(const float t) const
 
 SCurveProfile::SCurveProfile(const Config& cfg, float xs, float vs, float as, float xe)
 {
-    auto vm = fabsf(cfg.vm), am = fabsf(cfg.am), jm = fabsf(cfg.jm);
+    auto vm = fabsf(cfg.max_spd), am = fabsf(cfg.max_acc), jm = fabsf(cfg.max_jerk);
 
     // 全部归到正向移动判断
     const float dir = xe > xs ? 1.0f : -1.0f;

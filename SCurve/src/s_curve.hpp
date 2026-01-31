@@ -21,30 +21,43 @@ class SCurveProfile final : public IVelocityProfile
 public:
     struct Config
     {
-        float vm;
-        float am;
-        float jm;
+        float max_spd;
+        float max_acc;
+        float max_jerk;
     };
 
     SCurveProfile(const Config& cfg, float xs, float vs, float as, float xe);
 
-    float CalcX(float t) const override;
-    float CalcV(float t) const override;
-    float CalcA(float t) const override;
-    float getTotalTime() const override { return total_time_; }
-    bool  success() const override { return success_; }
+    [[nodiscard]] float CalcX(float t) const override;
+    [[nodiscard]] float CalcV(float t) const override;
+    [[nodiscard]] float CalcA(float t) const override;
+    [[nodiscard]] float getTotalTime() const override
+    {
+        return total_time_;
+    }
+    [[nodiscard]] bool success() const override
+    {
+        return success_;
+    }
 
 private:
     class SCurveAccel
     {
     public:
         SCurveAccel();
-        void  init(float vs, float vp, float am, float jm);
-        float getDistance(float t) const;
-        float getVelocity(float t) const;
-        float getAcceleration(float t) const;
-        float getTotalDistance() const { return total_distance_; }
-        float getTotalTime() const { return total_time_; }
+        void init(float vs, float vp, float am, float jm);
+
+        [[nodiscard]] float getDistance(float t) const;
+        [[nodiscard]] float getVelocity(float t) const;
+        [[nodiscard]] float getAcceleration(float t) const;
+        [[nodiscard]] float getTotalDistance() const
+        {
+            return total_distance_;
+        }
+        [[nodiscard]] float getTotalTime() const
+        {
+            return total_time_;
+        }
 
     private:
         bool  has_uniform_; ///< 是否有匀加速段
