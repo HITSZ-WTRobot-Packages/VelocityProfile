@@ -19,6 +19,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import math
 
 
+S_CURVE_MAX_BS_ERROR = 0.001
+
+
 class SCurveAccel:
     def __init__(self):
         self.has_uniform = False
@@ -130,19 +133,28 @@ class SCurve:
         self.vp = 0.0
         self.vs = 0.0
         self.as_ = 0.0
+        self.ve = 0.0
+        self.ae = 0.0
         self.jm = 0.0
 
-        self.t0 = 0.0
-        self.x0 = 0.0
-
         self.xs = 0.0
-        self.x1 = 0.0
-        self.x2 = 0.0
         self.xe = 0.0
-
-        self.process1 = SCurveAccel()
+        self.t1_pre = 0.0
+        self.x1_pre = 0.0
         self.ts1 = 0.0
         self.xs1 = 0.0
+
+        self.vrs = 0.0
+        self.ars = 0.0
+        self.t3_pre = 0.0
+        self.x3_pre = 0.0
+        self.ts3 = 0.0
+        self.xs3 = 0.0
+
+        self.x1 = 0.0
+        self.x2 = 0.0
+
+        self.process1 = SCurveAccel()
         self.t1 = 0.0
 
         self.t2 = 0.0
@@ -155,12 +167,12 @@ class SCurve:
                 f"    has_const: {self.has_const}, dir: {self.direction},\n"
                 f"    vp: {self.vp},"
                 f"    xs: {self.xs}, x1: {self.x1}, x2: {self.x2}, xe: {self.xe},\n"
-                f"    ts1: {self.ts1}, t1: {self.t1}, t2: {self.t2}, tot: {self.total_time},\n"
+                f"    ts1: {self.ts1}, ts3: {self.ts3}, t1: {self.t1}, t2: {self.t2}, tot: {self.total_time},\n"
                 f"    proc1: {self.process1},\n"
                 f"    proc3: {self.process3},\n"
                 f")")
 
-    def init(self, xs, xe, vs, as_, vm, am, jm):
+    def init(self, xs, xe, vs, as_, vm, am, jm, ve=0.0, ae=0.0):
         vm = abs(vm)
         am = abs(am)
         jm = abs(jm)
@@ -172,66 +184,111 @@ class SCurve:
         length = abs(xe - xs)
         vs = vs * dir_
         as_ = as_ * dir_
+        ve = ve * dir_
+        ae = ae * dir_
 
         self.vs = vs
         self.as_ = as_
+        self.ve = ve
+        self.ae = ae
         self.jm = jm
 
-        if abs(vs) > vm or abs(as_) > am:
+        if length < 1e-6:
+            if abs(vs - ve) > 1e-3 or abs(as_ - ae) > 1e-3:
+                return SCurve.S_CURVE_FAILED
+
+            self.has_const = False
+            self.t1_pre = 0.0
+            self.t1 = 0.0
+            self.t2 = 0.0
+            self.t3_pre = 0.0
+            self.x3_pre = 0.0
+            self.ts1 = 0.0
+            self.ts3 = 0.0
+            self.xs1 = 0.0
+            self.xs3 = 0.0
+            self.total_time = 0.0
+            return SCurve.S_CURVE_SUCCESS
+
+        if abs(vs) > vm or abs(as_) > am or abs(ve) > vm or abs(ae) > am:
+            return SCurve.S_CURVE_FAILED
+
+        def prepare_side(v0, a0):
+            ret = {
+                "t_pre": 0.0,
+                "x_pre": 0.0,
+                "v_base": 0.0,
+                "t_shift": 0.0,
+                "vp_min": 0.0,
+                "valid": True,
+            }
+
+            if a0 < 0:
+                ret["v_base"] = v0 - 0.5 * a0 * a0 / jm
+                if abs(ret["v_base"]) > vm:
+                    ret["valid"] = False
+                    return ret
+
+                ret["vp_min"] = ret["v_base"]
+                ret["t_pre"] = -a0 / jm
+                ret["x_pre"] = v0 * ret["t_pre"] + (1 / 3.0) * a0 * ret["t_pre"] * ret["t_pre"]
+            else:
+                ret["vp_min"] = v0 + 0.5 * a0 * a0 / jm
+                if vm < ret["vp_min"]:
+                    ret["valid"] = False
+                    return ret
+
+                ret["t_shift"] = a0 / jm
+                ret["v_base"] = v0 - 0.5 * a0 * ret["t_shift"]
+
+            if ret["vp_min"] < 0:
+                ret["vp_min"] = 0.0
+            return ret
+
+        start = prepare_side(vs, as_)
+        if not start["valid"]:
+            return SCurve.S_CURVE_FAILED
+
+        self.vrs = ve
+        self.ars = -ae
+        endr = prepare_side(self.vrs, self.ars)
+        if not endr["valid"]:
+            return SCurve.S_CURVE_FAILED
+
+        self.t1_pre = start["t_pre"]
+        self.x1_pre = xs + dir_ * start["x_pre"]
+        self.ts1 = start["t_shift"]
+        self.t3_pre = endr["t_pre"]
+        self.x3_pre = endr["x_pre"]
+        self.ts3 = endr["t_shift"]
+
+        vp_min = max(start["vp_min"], endr["vp_min"])
+        if vm < vp_min:
+            return SCurve.S_CURVE_FAILED
+
+        len0 = length - start["x_pre"] - endr["x_pre"]
+        if len0 < -S_CURVE_MAX_BS_ERROR:
             return SCurve.S_CURVE_FAILED
 
         vp = vm
-        vs0 = None
-        dx0 = None
-        vp_min = None
-        vs1 = None
-        ts1 = None
+        self.process1.init(start["v_base"], vp, am, jm)
+        self.process3.init(endr["v_base"], vp, am, jm)
+        self.xs1 = self.process1.get_distance(self.ts1)
+        self.xs3 = self.process3.get_distance(self.ts3)
 
-        if as_ < 0:
-            vs0 = vs - 0.5 * as_ * as_ / jm
-            if abs(vs0) > vm:
-                return SCurve.S_CURVE_FAILED
-            vp_min = vs0
-
-            ts0 = -as_ / jm
-            self.t0 = ts0
-
-            dx0 = vs * ts0 + (1 / 3.0) * as_ * ts0 * ts0
-            self.x0 = xs + dir_ * dx0
-            vs1 = vs0
-            ts1 = 0
-        else:
-            vp_min = vs + 0.5 * as_ * as_ / jm
-            vs0 = vs
-            dx0 = 0
-            self.t0 = 0
-            self.x0 = xs
-
-            if vm < vp_min:
-                return SCurve.S_CURVE_FAILED
-
-            ts1 = as_ / jm
-            vs1 = vs - 0.5 * as_ * ts1
-        vp_min = max(0, vp_min)
-        len0 = length - dx0
-
-        self.process1.init(vs1, vp, am, jm)
-        self.process3.init(0, vp, am, jm)
-        self.xs1 = self.process1.get_distance(ts1)
-        dx1 = self.process1.total_distance - self.xs1
-        dx3 = self.process3.total_distance
-        x_const = len0 - dx1 - dx3
+        dx1 = start["x_pre"] + self.process1.total_distance - self.xs1
+        dx3 = endr["x_pre"] + self.process3.total_distance - self.xs3
+        x_const = length - dx1 - dx3
 
         if x_const > 0:
             self.has_const = True
-            self.ts1 = ts1
-            self.t1 = self.t0 + self.process1.total_time - ts1
+            self.t1 = self.t1_pre + self.process1.total_time - self.ts1
 
             t_const = x_const / vm
             self.t2 = self.t1 + t_const
-            self.total_time = self.t2 + self.process3.total_time
+            self.total_time = self.t2 + self.t3_pre + self.process3.total_time - self.ts3
 
-            self.x1 = self.x0 + self.direction * dx1
+            self.x1 = self.xs + self.direction * dx1
             self.x2 = self.x1 + self.direction * x_const
             self.vp = vm
             return SCurve.S_CURVE_SUCCESS
@@ -240,17 +297,17 @@ class SCurve:
         r = vm
         delta_d = len0
 
-        cnt = 0
-
-        while (r - vp_min) > 0.001:
-            cnt += 1
+        while (r - l) > S_CURVE_MAX_BS_ERROR:
             mid = 0.5 * (l + r)
-            self.process1.init(vs1, mid, am, jm)
-            self.process3.init(0, mid, am, jm)
-            dx1 = self.process1.total_distance - self.process1.get_distance(ts1)
-            dx3 = self.process3.total_distance
-            delta_d = dx1 + dx3 - len0
-            if -0.001 < delta_d < 0.001:
+            self.process1.init(start["v_base"], mid, am, jm)
+            self.process3.init(endr["v_base"], mid, am, jm)
+
+            self.xs1 = self.process1.get_distance(self.ts1)
+            self.xs3 = self.process3.get_distance(self.ts3)
+            dx1 = start["x_pre"] + self.process1.total_distance - self.xs1
+            dx3 = endr["x_pre"] + self.process3.total_distance - self.xs3
+            delta_d = dx1 + dx3 - length
+            if -S_CURVE_MAX_BS_ERROR < delta_d < S_CURVE_MAX_BS_ERROR:
                 r = l = mid
                 break
             if delta_d > 0:
@@ -258,62 +315,92 @@ class SCurve:
             else:
                 l = mid
 
-        print(cnt)
+        vp = 0.5 * (l + r)
+        self.process1.init(start["v_base"], vp, am, jm)
+        self.process3.init(endr["v_base"], vp, am, jm)
+        self.xs1 = self.process1.get_distance(self.ts1)
+        self.xs3 = self.process3.get_distance(self.ts3)
+        dx1 = start["x_pre"] + self.process1.total_distance - self.xs1
+        dx3 = endr["x_pre"] + self.process3.total_distance - self.xs3
+        delta_d = dx1 + dx3 - length
 
-        if delta_d > 0.001:
+        if delta_d > S_CURVE_MAX_BS_ERROR:
             return SCurve.S_CURVE_FAILED
 
         self.has_const = False
-        self.ts1 = ts1
-        self.t1 = self.t0 + self.process1.total_time - ts1
+        self.t1 = self.t1_pre + self.process1.total_time - self.ts1
         self.t2 = self.t1
-        self.total_time = self.t2 + self.process3.total_time
+        self.total_time = self.t2 + self.t3_pre + self.process3.total_time - self.ts3
 
-        self.x1 = self.x0 + self.direction * dx1
+        self.x1 = self.xs + self.direction * dx1
         self.x2 = self.x1
-        self.vp = r
+        self.vp = vp
 
         return SCurve.S_CURVE_SUCCESS
+
+    def _get_reverse_distance(self, tau):
+        if tau <= 0:
+            return 0.0
+        if tau < self.t3_pre:
+            return (self.vrs * tau +
+                    0.5 * self.ars * tau * tau +
+                    (1 / 6.0) * self.jm * tau * tau * tau)
+
+        return self.x3_pre + self.process3.get_distance(tau - self.t3_pre + self.ts3) - self.xs3
+
+    def _get_reverse_velocity(self, tau):
+        if tau <= 0:
+            return self.vrs
+        if tau < self.t3_pre:
+            return self.vrs + self.ars * tau + 0.5 * self.jm * tau * tau
+
+        return self.process3.get_velocity(tau - self.t3_pre + self.ts3)
+
+    def _get_reverse_acceleration(self, tau):
+        if tau <= 0:
+            return self.ars
+        if tau < self.t3_pre:
+            return self.ars + self.jm * tau
+
+        return self.process3.get_acceleration(tau - self.t3_pre + self.ts3)
 
     def calc_x(self, t):
         if t <= 0:
             return self.xs
-        if t < self.t0:
+        if t < self.t1_pre:
             t2 = t * t
             t3 = t2 * t
-            return self.xs + self.direction * (self.vs * t +
-                                               0.5 * self.as_ * t2 +
-                                               (1 / 6.0) * self.jm * t3)
+            return self.xs + self.direction * (self.vs * t + 0.5 * self.as_ * t2 + (1 / 6.0) * self.jm * t3)
         if t < self.t1:
-            return self.x0 + self.direction * (self.process1.get_distance(t + self.ts1 - self.t0) - self.xs1)
+            return self.x1_pre + self.direction * (self.process1.get_distance(t - self.t1_pre + self.ts1) - self.xs1)
         if self.has_const and t < self.t2:
             return self.x1 + self.direction * self.vp * (t - self.t1)
         if t < self.total_time:
-            return self.xe - self.direction * self.process3.get_distance(self.total_time - t)
+            return self.xe - self.direction * self._get_reverse_distance(self.total_time - t)
         return self.xe
 
     def calc_v(self, t):
         if t <= 0:
             return self.direction * self.vs
-        if t < self.t0:
+        if t < self.t1_pre:
             return self.direction * (self.vs + self.as_ * t + 0.5 * self.jm * t * t)
         if t < self.t1:
-            return self.direction * self.process1.get_velocity(t + self.ts1 - self.t0)
+            return self.direction * self.process1.get_velocity(t - self.t1_pre + self.ts1)
         if self.has_const and t < self.t2:
             return self.direction * self.vp
         if t < self.total_time:
-            return self.direction * self.process3.get_velocity(self.total_time - t)
-        return 0.0
+            return self.direction * self._get_reverse_velocity(self.total_time - t)
+        return self.direction * self.ve
 
     def calc_a(self, t):
         if t <= 0:
             return self.direction * self.as_
-        if t < self.t0:
+        if t < self.t1_pre:
             return self.direction * (self.as_ + self.jm * t)
         if t < self.t1:
-            return self.direction * self.process1.get_acceleration(t + self.ts1 - self.t0)
+            return self.direction * self.process1.get_acceleration(t - self.t1_pre + self.ts1)
         if self.has_const and t < self.t2:
             return 0.0
         if t < self.total_time:
-            return -self.direction * self.process3.get_acceleration(self.total_time - t)
-        return 0.0
+            return -self.direction * self._get_reverse_acceleration(self.total_time - t)
+        return self.direction * self.ae

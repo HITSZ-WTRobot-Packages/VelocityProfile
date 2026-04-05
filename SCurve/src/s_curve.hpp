@@ -26,7 +26,13 @@ public:
         float max_jerk;
     };
 
-    SCurveProfile(const Config& cfg, float xs, float vs, float as, float xe);
+    SCurveProfile(const Config& cfg,
+                  float         xs,
+                  float         vs,
+                  float         as,
+                  float         xe,
+                  float         ve = 0,
+                  float         ae = 0);
 
     [[nodiscard]] float CalcX(float t) const override;
     [[nodiscard]] float CalcV(float t) const override;
@@ -60,6 +66,7 @@ private:
         }
 
     private:
+    // 加速度器相关参数
         bool  has_uniform_; ///< 是否有匀加速段
         float vs_;
         float jm_;
@@ -78,34 +85,61 @@ private:
         float vp_;
     };
 
+    struct SidePrepare
+    {
+        float t_pre;
+        float x_pre;
+        float v_base;
+        float t_shift;
+        float vp_min;
+        bool  valid;
+    };
+
     bool success_;
 
+    // 状态标志与全局约束
     bool  has_const_; ///< 是否有匀速段
     float direction_; ///< 运行方向
-    float vp_;        ///< 最大速度
-    float vs_;        ///< 初始速度
-    float as_;        ///< 初始加速度
     float jm_;        ///< 最大加加速度
+    float vp_;        ///< 最大速度
 
-    // 可能的加速度刹车过程
-    float t0_;
-    float x0_;
-
+    // 边界条件（按起点/终点分组）
     float xs_; ///< 初始位置
-    float x1_; ///< 加速与匀速过程位置分界
-    float x2_; ///< 匀速与减速过程位置分界
     float xe_; ///< 末位置
+    float ve_; ///< 末速度
+    float ae_; ///< 末加速度
 
-    SCurveAccel process1_{};
-    float       ts1_; ///< 第一段非对称过程的时间偏移
-    float       xs1_; ///< 第一段非对称过程的起始位置
-    float       t1_;  ///< 加速与匀速过程时刻分界
+    // 起点过程相关
+    float vs_; ///< 初始速度
+    float as_; ///< 初始加速度
+    float t1_pre_; ///< 起点预处理时长
+    float x1_pre_; ///< 起点预处理位移
+    float ts1_; ///< 第一段非对称过程的时间偏移
+    float xs1_; ///< 第一段非对称过程的起始位置
 
+    // 终点（逆过程）
+    float vrs_;    ///< 逆过程起始速度（即末速度） 
+    float ars_;    ///< 逆过程起始加速度（即 -a_e)
+    float t3_pre_; ///< 末端逆过程的预处理时长
+    float x3_pre_; ///< 末端逆过程的预处理位移 
+    float ts3_;    ///< 第三段非对称过程的时间偏移（逆过程）
+    float xs3_;    ///< 第三段非对称过程的起始位置（逆过程）
+   
+    // 时序/位置分界
+    float t1_; ///< 加速与匀速过程时刻分界
     float t2_; ///< 匀速与减速过程时刻分界
-
+    float x1_; ///< 加速与匀速过程位置分界
+    float x2_; ///< 匭匀与减加速过程位置分界
+    
+    float total_time_;
+    
+    SCurveAccel process1_{};
     SCurveAccel process3_{};
 
-    float total_time_;
+
+    [[nodiscard]] float getReverseDistance(float tau) const;
+    [[nodiscard]] float getReverseVelocity(float tau) const;
+    [[nodiscard]] float getReverseAcceleration(float tau) const;
 
 #ifdef DEBUG
     uint32_t binary_search_count_;
