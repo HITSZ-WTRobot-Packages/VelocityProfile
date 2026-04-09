@@ -12,46 +12,56 @@ namespace velocity_profile
 {
 namespace
 {
+/**
+ * 构造 SCurveProfile 时，需要反复判断：
+ * “若峰值速度取 vp，则起点侧和终点侧一共要消耗多少位移？”
+ *
+ * 为了让这一判断可以在二分搜索中高频执行，这里提供一套只关注位移估算的轻量结构，
+ * 避免在每次试探峰值速度时都完整初始化 SCurveAccel 对象。
+ */
 constexpr float kHalf      = 0.5f;
 constexpr float kOneSixth  = 1.0f / 6.0f;
 constexpr float kZero      = 0.0f;
 
 struct FastEvalConfig
 {
-    float am;
-    float jm;
-    float am_square;
-    float jerk_ramp_time;
-    float inv_double_am;
+    float am;              ///< 最大加速度。
+    float jm;              ///< 最大加加速度。
+    float am_square;       ///< am^2，避免在循环内重复乘法。
+    float jerk_ramp_time;  ///< 从 0 提升到最大加速度所需时长 am / jm。
+    float inv_double_am;   ///< 1 / (2 * am)，用于距离公式复用。
 };
 
 struct FastEvalSide
 {
-    float v_base;
-    float x_pre;
-    float t_shift;
+    float v_base;  ///< 标准单边过程的等效起始速度。
+    float x_pre;   ///< 本侧显式预处理已经占用的位移。
+    float t_shift; ///< 在标准单边过程上需要跳过的前置时间。
 };
 
 struct FastEvalProfile
 {
-    bool  has_uniform;
-    float v_base;
-    float vp;
-    float t1;
-    float t2;
-    float x1;
-    float v1;
-    float total_time;
-    float total_distance;
+    bool  has_uniform;     ///< 是否存在匀加速段。
+    float v_base;          ///< 过程起始速度。
+    float vp;              ///< 候选峰值速度。
+    float t1;              ///< 加加速段结束时刻。
+    float t2;              ///< 匀加速段结束时刻；三角曲线时与 t1 相同。
+    float x1;              ///< 加加速段结束位移。
+    float v1;              ///< 加加速段结束速度。
+    float total_time;      ///< 单边过程总时长。
+    float total_distance;  ///< 单边过程总位移。
 };
 
 struct FastEvalResult
 {
-    float dx1;
-    float dx3;
-    float delta;
+    float dx1;   ///< 起点侧消耗位移。
+    float dx3;   ///< 终点侧消耗位移。
+    float delta; ///< dx1 + dx3 - len，用于判定候选峰速偏大还是偏小。
 };
 
+/**
+ * @brief 为指定起始速度和候选峰值速度构造单边标准加速过程的轻量描述。
+ */
 [[nodiscard]] FastEvalProfile BuildFastEvalProfile(const FastEvalConfig& cfg,
                                                    const float           v_base,
                                                    const float           vp)
@@ -87,6 +97,9 @@ struct FastEvalResult
     return profile;
 }
 
+/**
+ * @brief 计算轻量单边过程在时刻 @p t 内已经走过的位移。
+ */
 [[nodiscard]] float EvaluateFastEvalDistance(const FastEvalConfig&  cfg,
                                              const FastEvalProfile& profile,
                                              const float            t)
@@ -112,6 +125,13 @@ struct FastEvalResult
     return profile.total_distance;
 }
 
+/**
+ * @brief 计算某一侧在候选峰值速度 @p vp 下总共会占用的位移。
+ *
+ * 位移由两部分组成：
+ * - 显式预处理段 `x_pre`；
+ * - 标准单边过程的总位移减去时间平移前被“吸收”的那一小段。
+ */
 [[nodiscard]] float EvaluateSideDistance(const FastEvalConfig& cfg,
                                          const FastEvalSide&   side,
                                          const float           vp)
@@ -126,6 +146,12 @@ struct FastEvalResult
     return side.x_pre + profile.total_distance - shift_distance;
 }
 
+/**
+ * @brief 计算当前候选峰值速度相对目标总位移的偏差。
+ *
+ * delta > 0 表示两侧过程消耗的位移过长，峰值速度应该降低；
+ * delta < 0 表示仍有剩余路程，可继续提高峰值速度或引入匀速段。
+ */
 [[nodiscard]] FastEvalResult EvaluateDistanceDelta(const FastEvalConfig& cfg,
                                                    const FastEvalSide&   start,
                                                    const FastEvalSide&   end,
@@ -146,11 +172,23 @@ SCurveProfile::SCurveAccel::SCurveAccel() :
 {
 }
 
+/**
+ * 内部单边加速器只处理“速度单调上升”的标准情形。
+ *
+ * 初始化时会根据 `vp - vs` 是否足以碰到最大加速度 `am`，分成两种实现：
+ * - 梯形加速度曲线：`加加速 -> 匀加速 -> 减加速`
+ * - 三角加速度曲线：`加加速 -> 减加速`
+ *
+ * 后续 `getDistance/getVelocity/getAcceleration` 只需要按这些阶段分段求值即可。
+ */
 void SCurveProfile::SCurveAccel::init(const float vs,
                                       const float vp,
                                       const float am,
                                       const float jm)
 {
+    // 先判断是否能触及最大加速度：
+    // - 能触及：加速度曲线为梯形（存在匀加速段）；
+    // - 不能触及：加速度曲线为三角形（只经历加加速和减加速）。
     has_uniform_ = jm * (vp - vs) > am * am;
     vs_          = vs;
     vp_          = vp;
@@ -195,7 +233,7 @@ float SCurveProfile::SCurveAccel::getDistance(const float t) const
     {
         return vs_ * t + 1 / 6.0f * jm_ * t * t * t;
     }
-    // 除了这段以外两种情况都一样
+    // 只有存在匀加速平台时才会进入这一段；三角曲线会直接落到最后一段。
     if (has_uniform_ && t < t2_)
     {
         const float _t = t - t1_;
@@ -242,6 +280,15 @@ float SCurveProfile::SCurveAccel::getAcceleration(const float t) const
     return 0;
 }
 
+/**
+ * SCurveProfile 的求解过程分为 4 步：
+ * 1. 方向归一化：把位移统一折算为正向问题，减少分支；
+ * 2. 单侧边界规整：把起点/终点的速度与加速度约束转成内部过程可处理的形式；
+ * 3. 峰值速度判定：先尝试直接到 `vm` 并插入匀速段；
+ * 4. 无匀速时二分：若路程不足以容纳匀速段，则二分峰值速度直到刚好满足位移约束。
+ *
+ * 求解完成后，轨迹采样阶段再根据时刻落在哪个区间，分别调用起点过程、匀速段或终点逆过程。
+ */
 SCurveProfile::SCurveProfile(const Config& cfg,
                              float         xs,
                              float         vs,
@@ -250,11 +297,12 @@ SCurveProfile::SCurveProfile(const Config& cfg,
                              float         ve,
                              float         ae)
 {
+    // 约束全部按绝对值解释，方向统一由起终点位置决定。
     auto vm =  fabsf(cfg.max_spd);
     auto am =  fabsf(cfg.max_acc);
     auto jm =  fabsf(cfg.max_jerk);
 
-    // 全部归到正向移动判断
+    // 全部折算到“正向移动”求解，最后再通过 direction_ 恢复原始方向。
     const float dir = xe > xs ? 1.0f : -1.0f;
     direction_      = dir;
     xs_             = xs;
@@ -271,7 +319,7 @@ SCurveProfile::SCurveProfile(const Config& cfg,
     ae_ = ae;
     jm_ = jm;
 
-    // 如果目标基本没有变化，则不动
+    // 若位移接近 0，则只有“初末速度和加速度也完全一致”才算可行静止解。
     if (len < 1e-6f)
     {
         if ( fabsf(vs - ve) > 1e-3f ||  fabsf(as - ae) > 1e-3f)
@@ -296,13 +344,23 @@ SCurveProfile::SCurveProfile(const Config& cfg,
 
     if ( fabsf(vs) > vm ||  fabsf(as) > am ||  fabsf(ve) > vm ||  fabsf(ae) > am)
     {
-        // 初末边界超限则无法构建曲线
+        // 初末边界本身已经违反约束时，不存在可行解。
         success_ = false;
         return;
     }
 
-    
-
+    /**
+     * 把单侧边界条件规整成“标准单边加速器可消费”的形式。
+     *
+     * 实现分两类：
+     * - `a0 < 0`：当前加速度与运动方向相反，必须先显式把加速度抬回 0；
+     * - `a0 >= 0`：当前加速度与运动方向同向，可通过时间平移吸收进标准过程。
+     *
+     * 规整结果会给出：
+     * - 显式预处理的时间/位移；
+     * - 进入内部单边加速器时的等效基线速度；
+     * - 该侧允许的峰值速度下界。
+     */
     const auto prepareSide = [vm, jm](const float v0, const float a0) {
         SidePrepare ret{};
         ret.valid = true;
@@ -378,6 +436,7 @@ SCurveProfile::SCurveProfile(const Config& cfg,
     x3_pre_ = endr.x_pre;
     ts3_    = endr.t_shift;
 
+    // 峰值速度必须同时满足起点侧和终点侧的最低要求。
     float vp_min =  fmaxf(start.vp_min, endr.vp_min);
     if (vp_min < 0)
         vp_min = 0;
@@ -387,10 +446,11 @@ SCurveProfile::SCurveProfile(const Config& cfg,
         return;
     }
 
+    // 去掉两端显式预处理后，中间仍需由主过程覆盖的净位移。
     const float len0 = len - start.x_pre - endr.x_pre;
     if (len0 < -S_CURVE_MAX_BS_ERROR)
     {
-        // 固定位移已经超过目标距离，无法构造满足边界的轨迹
+        // 两端固定预处理已经把路走“超了”，因此一定无解。
         success_ = false;
         return;
     }
@@ -405,7 +465,8 @@ SCurveProfile::SCurveProfile(const Config& cfg,
     const FastEvalSide start_eval{start.v_base, start.x_pre, start.t_shift};
     const FastEvalSide end_eval{endr.v_base, endr.x_pre, endr.t_shift};
 
-    // 首先假定存在匀速段
+    // 先尝试“峰值速度能到 vm，并且中间还留有匀速段”的情况。
+    // 若此时两侧过程消耗的位移仍小于总位移，则剩余部分就是匀速段。
     const FastEvalResult vm_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vm);
     const float          x_const = -vm_eval.delta;
     if (x_const > 0)
@@ -433,7 +494,8 @@ SCurveProfile::SCurveProfile(const Config& cfg,
         return;
     }
 
-    // 不存在匀速段，求最大速度（纯二分 + 轻量评估）
+    // 若在 vm 下已经没有余量，则轨迹退化为“加速后立即减速”。
+    // 由于总位移随峰值速度单调变化，这里可以直接对峰值速度做二分搜索。
     float l = vp_min, r = vm;
     float delta_d = len0, dx1 = 0, dx3 = 0;
 
@@ -459,6 +521,8 @@ SCurveProfile::SCurveProfile(const Config& cfg,
             l = mid;
     }
 
+    // 用最终二分结果重建精确的单边过程，并刷新分界时刻/位置。
+    // 轻量估算只用于搜索；真正落盘到成员变量时仍以完整过程为准。
     const float vp = 0.5f * (l + r);
     process1_.init(start.v_base, vp, am, jm);
     process3_.init(endr.v_base, vp, am, jm);
@@ -494,11 +558,14 @@ float SCurveProfile::getReverseDistance(const float tau) const
         return 0;
     if (tau < t3_pre_)
     {
+        // 末端逆过程的显式预处理段。
+        // 这里使用的是“从终点往回看”的时间变量 tau，因此符号与正向过程不同。
         const float tau2 = tau * tau;
         const float tau3 = tau2 * tau;
         return ve_ * tau - 0.5f * ae_ * tau2 + 1 / 6.0f * jm_ * tau3;
     }
 
+    // 进入标准单边加速器后，减去时间平移前已经被吸收的位移基准 xs3_。
     return x3_pre_ + process3_.getDistance(tau - t3_pre_ + ts3_) - xs3_;
 }
 
@@ -526,23 +593,25 @@ float SCurveProfile::CalcX(const float t) const
 {
     if (!success_)
         return 0;
+    // 外部采样统一走“按时间落区间分段求值”的实现：
+    // 起点预处理 -> 主加速 -> 匀速 -> 末端逆过程。
     // 起始之前
     if (t <= 0)
         return xs_;
-    // 反向加速度刹车
+    // 起点预处理：先把与运动方向相反的初始加速度抬回 0。
     if (t < t1_pre_)
     {
         const float t2 = t * t;
         const float t3 = t2 * t;
         return xs_ + direction_ * (vs_ * t + 0.5f * as_ * t2 + 1 / 6.0f * jm_ * t3);
     }
-    // 加速过程
+    // 主加速段：调用标准单边加速器，并扣掉时间平移前已经吸收的那部分位移。
     if (t < t1_)
         return x1_pre_ + direction_ * (process1_.getDistance(t - t1_pre_ + ts1_) - xs1_);
     // 匀速过程
     if (has_const_ && t < t2_)
         return x1_ + direction_ * vp_ * (t - t1_);
-    // 减速过程
+    // 减速段通过“从终点反推”计算，能自然兼容终点速度/加速度约束。
     if (t < total_time_)
         return xe_ - direction_ * getReverseDistance(total_time_ - t);
     return xe_;
@@ -555,16 +624,16 @@ float SCurveProfile::CalcV(const float t) const
     // 起始之前
     if (t <= 0)
         return direction_ * vs_;
-    // 反向加速度刹车
+    // 起点预处理段。
     if (t < t1_pre_)
         return direction_ * (vs_ + as_ * t + 0.5f * jm_ * t * t);
-    // 加速过程
+    // 主加速段。
     if (t < t1_)
         return direction_ * process1_.getVelocity(t - t1_pre_ + ts1_);
     // 匀速过程
     if (has_const_ && t < t2_)
         return direction_ * vp_;
-    // 减速过程
+    // 逆过程映射到正向时间后的减速段。
     if (t < total_time_)
         return direction_ * getReverseVelocity(total_time_ - t);
     return direction_ * ve_;
@@ -577,16 +646,16 @@ float SCurveProfile::CalcA(const float t) const
     // 起始之前
     if (t <= 0)
         return direction_ * as_;
-    // 反向加速度刹车
+    // 起点预处理段。
     if (t < t1_pre_)
         return direction_ * (as_ + jm_ * t);
-    // 加速过程
+    // 主加速段。
     if (t < t1_)
         return direction_ * process1_.getAcceleration(t - t1_pre_ + ts1_);
     // 匀速过程
     if (has_const_ && t < t2_)
         return 0;
-    // 减速过程
+    // 逆过程映射到正向时间后的减速段。
     if (t < total_time_)
         return -direction_ * getReverseAcceleration(total_time_ - t);
     return direction_ * ae_;
