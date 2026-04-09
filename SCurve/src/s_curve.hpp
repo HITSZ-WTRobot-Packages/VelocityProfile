@@ -6,7 +6,7 @@
 #ifndef S_CURVE_HPP
 #define S_CURVE_HPP
 #include <cstdint>
-#include "IVelocityProfile.hpp"
+#include "../Modules/VelocityProfile/Core/IVelocityProfile.hpp"
 
 // 最大二分查找误差
 #ifndef S_CURVE_MAX_BS_ERROR
@@ -78,8 +78,6 @@ private:
         float x1_; ///< 加加速段与匀加速段距离分界
         float v1_; ///< 加加速段与匀加速段速度分界
         float t2_; ///< 匀加速段与减加速段时刻分界
-        float x2_; ///< 匀加速段与减加速段距离分界
-        float v2_; ///< 匀加速段与减加速段速度分界
 
         float ap_;
         float vp_;
@@ -118,8 +116,6 @@ private:
     float xs1_; ///< 第一段非对称过程的起始位置
 
     // 终点（逆过程）
-    float vrs_;    ///< 逆过程起始速度（即末速度） 
-    float ars_;    ///< 逆过程起始加速度（即 -a_e)
     float t3_pre_; ///< 末端逆过程的预处理时长
     float x3_pre_; ///< 末端逆过程的预处理位移 
     float ts3_;    ///< 第三段非对称过程的时间偏移（逆过程）
@@ -129,7 +125,6 @@ private:
     float t1_; ///< 加速与匀速过程时刻分界
     float t2_; ///< 匀速与减速过程时刻分界
     float x1_; ///< 加速与匀速过程位置分界
-    float x2_; ///< 匭匀与减加速过程位置分界
     
     float total_time_;
     

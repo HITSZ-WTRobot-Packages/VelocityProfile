@@ -1,17 +1,18 @@
 /**
  * @file    s_curve.cpp
- * @author  syhanjin
- * @date    2026-01-28
+ * @author  
+ * @date    2026-04-09
  */
 #include "s_curve.hpp"
 
 #include <cmath>
 
+
 namespace velocity_profile
 {
 SCurveProfile::SCurveAccel::SCurveAccel() :
     has_uniform_(false), vs_(0), jm_(0), total_time_(0), total_distance_(0), t1_(0), x1_(0), v1_(0),
-    t2_(0), x2_(0), v2_(0), ap_(0), vp_(0)
+    t2_(0), ap_(0), vp_(0)
 {
 }
 
@@ -30,13 +31,10 @@ void SCurveProfile::SCurveAccel::init(const float vs,
 
         t1_             = am / jm;          // 加加速段时长
         t2_             = (vp - vs) / am;   // 加加速度段与减加速段时刻分界（加加速度+匀加速度一共的时间）
-        const float dt2 = t2_ - t1_;        // 匀加速段时长
 
         v1_ = vs + 0.5f * am * t1_;         // 加加速段与匀加速段速度分界
-        v2_ = vp - 0.5f * am * t1_;         // 匀加速段与减加速段速度分界
 
         x1_ = vs * t1_ + 1 / 6.0f * am * t1_ * t1_;
-        x2_ = x1_ + v1_ * dt2 + 0.5f * am * dt2 * dt2;
 
         total_time_     = t2_ + t1_;
         total_distance_ = (vp * vp - vs * vs) / (2.0f * am) +
@@ -50,10 +48,8 @@ void SCurveProfile::SCurveAccel::init(const float vs,
         t2_ = t1_;                          // 没有匀加速段
 
         v1_ = vs + 0.5f * ap_ * ap_ / jm;
-        v2_ = v1_;
 
         x1_ = vs * t1_ + 1 / 6.0f * ap_ * t1_ * t1_;
-        x2_ = x1_;
 
         total_time_     = 2.0f * sqrtf((vp - vs) / jm);
         total_distance_ = (vs + vp) * sqrtf((vp - vs) / jm);
@@ -238,9 +234,7 @@ SCurveProfile::SCurveProfile(const Config& cfg,
     }
 
     // 终点边界通过时间反演变成“逆过程起点”约束：v_rs = v_e, a_rs = -a_e
-    ars_                   = -ae;
-    vrs_                   = ve;
-    const SidePrepare endr = prepareSide(vrs_, ars_);
+    const SidePrepare endr = prepareSide(ve, -ae);
     if (!endr.valid)
     {
         success_ = false;
@@ -271,62 +265,134 @@ SCurveProfile::SCurveProfile(const Config& cfg,
         return;
     }
 
-    // 首先假定存在匀速段
-    {
-        const float vp = vm;
-        process1_.init(start.v_base, vp, am, jm);
-        process3_.init(endr.v_base, vp, am, jm);
+    const float am2        = am * am;
+    const float t_jerk     = am / jm;
+    const float inv_2am    = 0.5f / am;
+    const float one_over_6 = 1.0f / 6.0f;
 
-        xs1_            = process1_.getDistance(ts1_);
-        xs3_            = process3_.getDistance(ts3_);
-        const float dx1 = start.x_pre + process1_.getTotalDistance() - xs1_;
-        const float dx3 = endr.x_pre + process3_.getTotalDistance() - xs3_;
-        const float x_const = len - dx1 - dx3;
-        if (x_const > 0)
+    const auto evaluate_side_dx = [am, jm, am2, t_jerk, inv_2am, one_over_6](const float v_base,
+                                                                              const float x_pre,
+                                                                              const float ts,
+                                                                              const float vp) {
+        const float dv = vp - v_base;
+        if (dv <= 0)
+            return x_pre;
+
+        if (jm * dv > am2)
         {
-            // 存在匀速段
-            has_const_ = true;
+            const float t1         = t_jerk;
+            const float t2         = dv / am;
+            const float total_time = t2 + t1;
+            const float v1         = v_base + 0.5f * am * t1;
+            const float x1         = v_base * t1 + one_over_6 * am * t1 * t1;
+            const float total_dist = (vp * vp - v_base * v_base) * inv_2am + 0.5f * (v_base + vp) * t1;
 
-            // 这里是时刻分界点，所以需要加上开头部分
-            t1_ = t1_pre_ + process1_.getTotalTime() - ts1_;
+            float x_ts = 0;
+            if (ts > 0)
+            {
+                if (ts < t1)
+                {
+                    x_ts = v_base * ts + one_over_6 * jm * ts * ts * ts;
+                }
+                else if (ts < t2)
+                {
+                    const float dt = ts - t1;
+                    x_ts           = x1 + v1 * dt + 0.5f * am * dt * dt;
+                }
+                else if (ts < total_time)
+                {
+                    const float dt = total_time - ts;
+                    x_ts           = total_dist - vp * dt + one_over_6 * jm * dt * dt * dt;
+                }
+                else
+                {
+                    x_ts = total_dist;
+                }
+            }
 
-            const float t_const = x_const / vm;
-            t2_                 = t1_ + t_const;
-            total_time_         = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
-
-            x1_ = xs_ + direction_ * dx1;
-            x2_ = x1_ + direction_ * x_const;
-
-            vp_ = vm;
-
-            success_ = true;
-            return;
+            return x_pre + total_dist - x_ts;
         }
+
+        const float ap         = sqrtf(jm * dv);
+        const float t1         = ap / jm;
+        const float total_time = 2.0f * t1;
+        const float total_dist = (v_base + vp) * t1;
+
+        float x_ts = 0;
+        if (ts > 0)
+        {
+            if (ts < t1)
+            {
+                x_ts = v_base * ts + one_over_6 * jm * ts * ts * ts;
+            }
+            else if (ts < total_time)
+            {
+                const float dt = total_time - ts;
+                x_ts           = total_dist - vp * dt + one_over_6 * jm * dt * dt * dt;
+            }
+            else
+            {
+                x_ts = total_dist;
+            }
+        }
+
+        return x_pre + total_dist - x_ts;
+    };
+
+    auto evaluate_delta = [&evaluate_side_dx, &start, &endr, len](const float vp, float* dx1_out, float* dx3_out) {
+        const float dx1 = evaluate_side_dx(start.v_base, start.x_pre, start.t_shift, vp);
+        const float dx3 = evaluate_side_dx(endr.v_base, endr.x_pre, endr.t_shift, vp);
+        if (dx1_out != nullptr)
+            *dx1_out = dx1;
+        if (dx3_out != nullptr)
+            *dx3_out = dx3;
+        return dx1 + dx3 - len;
+    };
+
+    // 首先假定存在匀速段
+    float dx1_vm = 0, dx3_vm = 0;
+    const float delta_vm = evaluate_delta(vm, &dx1_vm, &dx3_vm);
+    const float x_const = -delta_vm;
+    if (x_const > 0)
+    {
+        process1_.init(start.v_base, vm, am, jm);
+        process3_.init(endr.v_base, vm, am, jm);
+        xs1_ = process1_.getDistance(ts1_);
+        xs3_ = process3_.getDistance(ts3_);
+
+        // 存在匀速段
+        has_const_ = true;
+
+        // 这里是时刻分界点，所以需要加上开头部分
+        t1_ = t1_pre_ + process1_.getTotalTime() - ts1_;
+
+        const float t_const = x_const / vm;
+        t2_                 = t1_ + t_const;
+        total_time_         = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
+
+        x1_ = xs_ + direction_ * dx1_vm;
+
+        vp_ = vm;
+
+        success_ = true;
+        return;
     }
-    // 不存在匀速段，求最大速度
-    // 由于代数表达式太过复杂，这里直接上二分查找
+
+    // 不存在匀速段，求最大速度（纯二分 + 轻量评估）
     float l = vp_min, r = vm;
     float delta_d = len0, dx1 = 0, dx3 = 0;
 
 #ifdef DEBUG
     binary_search_count_ = 0;
 #endif
-    // 最大迭代次数约 13 次
     while (r - l > S_CURVE_MAX_BS_ERROR)
     {
 #ifdef DEBUG
         binary_search_count_++;
 #endif
         const float mid = 0.5f * (l + r);
-        process1_.init(start.v_base, mid, am, jm);
-        process3_.init(endr.v_base, mid, am, jm);
-        // 更新，用于判断是否找到解
-        xs1_    = process1_.getDistance(ts1_);
-        xs3_    = process3_.getDistance(ts3_);
-        dx1     = start.x_pre + process1_.getTotalDistance() - xs1_;
-        dx3     = endr.x_pre + process3_.getTotalDistance() - xs3_;
-        delta_d = dx1 + dx3 - len;
-        if (delta_d < S_CURVE_MAX_BS_ERROR && delta_d > -S_CURVE_MAX_BS_ERROR)
+        delta_d         = evaluate_delta(mid, nullptr, nullptr);
+        if (fabsf(delta_d) <= S_CURVE_MAX_BS_ERROR)
         {
             r = l = mid;
             break;
@@ -360,7 +426,6 @@ SCurveProfile::SCurveProfile(const Config& cfg,
     total_time_ = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
 
     x1_ = xs_ + direction_ * dx1;
-    x2_ = x1_;
 
     vp_ = vp;
 
@@ -375,7 +440,7 @@ float SCurveProfile::getReverseDistance(const float tau) const
     {
         const float tau2 = tau * tau;
         const float tau3 = tau2 * tau;
-        return vrs_ * tau + 0.5f * ars_ * tau2 + 1 / 6.0f * jm_ * tau3;
+        return ve_ * tau - 0.5f * ae_ * tau2 + 1 / 6.0f * jm_ * tau3;
     }
 
     return x3_pre_ + process3_.getDistance(tau - t3_pre_ + ts3_) - xs3_;
@@ -384,9 +449,9 @@ float SCurveProfile::getReverseDistance(const float tau) const
 float SCurveProfile::getReverseVelocity(const float tau) const
 {
     if (tau <= 0)
-        return vrs_;
+        return ve_;
     if (tau < t3_pre_)
-        return vrs_ + ars_ * tau + 0.5f * jm_ * tau * tau;
+        return ve_ - ae_ * tau + 0.5f * jm_ * tau * tau;
 
     return process3_.getVelocity(tau - t3_pre_ + ts3_);
 }
@@ -394,9 +459,9 @@ float SCurveProfile::getReverseVelocity(const float tau) const
 float SCurveProfile::getReverseAcceleration(const float tau) const
 {
     if (tau <= 0)
-        return ars_;
+        return -ae_;
     if (tau < t3_pre_)
-        return ars_ + jm_ * tau;
+        return -ae_ + jm_ * tau;
 
     return process3_.getAcceleration(tau - t3_pre_ + ts3_);
 }
