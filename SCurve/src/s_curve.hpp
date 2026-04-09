@@ -6,7 +6,7 @@
 #ifndef S_CURVE_HPP
 #define S_CURVE_HPP
 #include <cstdint>
-#include "../Modules/VelocityProfile/Core/IVelocityProfile.hpp"
+#include "IVelocityProfile.hpp"
 
 // 最大二分查找误差
 #ifndef S_CURVE_MAX_BS_ERROR
@@ -26,25 +26,14 @@ public:
         float max_jerk;
     };
 
-    SCurveProfile(const Config& cfg,
-                  float         xs,
-                  float         vs,
-                  float         as,
-                  float         xe,
-                  float         ve = 0,
-                  float         ae = 0);
+    SCurveProfile(
+            const Config& cfg, float xs, float vs, float as, float xe, float ve = 0, float ae = 0);
 
     [[nodiscard]] float CalcX(float t) const override;
     [[nodiscard]] float CalcV(float t) const override;
     [[nodiscard]] float CalcA(float t) const override;
-    [[nodiscard]] float getTotalTime() const override
-    {
-        return total_time_;
-    }
-    [[nodiscard]] bool success() const override
-    {
-        return success_;
-    }
+    [[nodiscard]] float getTotalTime() const override { return total_time_; }
+    [[nodiscard]] bool  success() const override { return success_; }
 
 private:
     class SCurveAccel
@@ -56,17 +45,11 @@ private:
         [[nodiscard]] float getDistance(float t) const;
         [[nodiscard]] float getVelocity(float t) const;
         [[nodiscard]] float getAcceleration(float t) const;
-        [[nodiscard]] float getTotalDistance() const
-        {
-            return total_distance_;
-        }
-        [[nodiscard]] float getTotalTime() const
-        {
-            return total_time_;
-        }
+        [[nodiscard]] float getTotalDistance() const { return total_distance_; }
+        [[nodiscard]] float getTotalTime() const { return total_time_; }
 
     private:
-    // 加速度器相关参数
+        // 加速度器相关参数
         bool  has_uniform_; ///< 是否有匀加速段
         float vs_;
         float jm_;
@@ -108,29 +91,28 @@ private:
     float ae_; ///< 末加速度
 
     // 起点过程相关
-    float vs_; ///< 初始速度
-    float as_; ///< 初始加速度
+    float vs_;     ///< 初始速度
+    float as_;     ///< 初始加速度
     float t1_pre_; ///< 起点预处理时长
     float x1_pre_; ///< 起点预处理位移
-    float ts1_; ///< 第一段非对称过程的时间偏移
-    float xs1_; ///< 第一段非对称过程的起始位置
+    float ts1_;    ///< 第一段非对称过程的时间偏移
+    float xs1_;    ///< 第一段非对称过程的起始位置
 
     // 终点（逆过程）
     float t3_pre_; ///< 末端逆过程的预处理时长
-    float x3_pre_; ///< 末端逆过程的预处理位移 
+    float x3_pre_; ///< 末端逆过程的预处理位移
     float ts3_;    ///< 第三段非对称过程的时间偏移（逆过程）
     float xs3_;    ///< 第三段非对称过程的起始位置（逆过程）
-   
+
     // 时序/位置分界
     float t1_; ///< 加速与匀速过程时刻分界
     float t2_; ///< 匀速与减速过程时刻分界
     float x1_; ///< 加速与匀速过程位置分界
-    
+
     float total_time_;
-    
+
     SCurveAccel process1_{};
     SCurveAccel process3_{};
-
 
     [[nodiscard]] float getReverseDistance(float tau) const;
     [[nodiscard]] float getReverseVelocity(float tau) const;

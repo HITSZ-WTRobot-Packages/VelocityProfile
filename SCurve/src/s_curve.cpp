@@ -10,6 +10,136 @@
 
 namespace velocity_profile
 {
+namespace
+{
+constexpr float kHalf      = 0.5f;
+constexpr float kOneSixth  = 1.0f / 6.0f;
+constexpr float kZero      = 0.0f;
+
+struct FastEvalConfig
+{
+    float am;
+    float jm;
+    float am_square;
+    float jerk_ramp_time;
+    float inv_double_am;
+};
+
+struct FastEvalSide
+{
+    float v_base;
+    float x_pre;
+    float t_shift;
+};
+
+struct FastEvalProfile
+{
+    bool  has_uniform;
+    float v_base;
+    float vp;
+    float t1;
+    float t2;
+    float x1;
+    float v1;
+    float total_time;
+    float total_distance;
+};
+
+struct FastEvalResult
+{
+    float dx1;
+    float dx3;
+    float delta;
+};
+
+[[nodiscard]] FastEvalProfile BuildFastEvalProfile(const FastEvalConfig& cfg,
+                                                   const float           v_base,
+                                                   const float           vp)
+{
+    FastEvalProfile profile{};
+    const float     delta_v = vp - v_base;
+
+    profile.v_base = v_base;
+    profile.vp     = vp;
+
+    if (cfg.jm * delta_v > cfg.am_square)
+    {
+        profile.has_uniform   = true;
+        profile.t1            = cfg.jerk_ramp_time;
+        profile.t2            = delta_v / cfg.am;
+        profile.v1            = v_base + kHalf * cfg.am * profile.t1;
+        profile.x1            = v_base * profile.t1 + kOneSixth * cfg.am * profile.t1 * profile.t1;
+        profile.total_time    = profile.t2 + profile.t1;
+        profile.total_distance = (vp * vp - v_base * v_base) * cfg.inv_double_am +
+                                 kHalf * (v_base + vp) * profile.t1;
+        return profile;
+    }
+
+    const float peak_acc = sqrtf(cfg.jm * delta_v);
+
+    profile.has_uniform    = false;
+    profile.t1             = peak_acc / cfg.jm;
+    profile.t2             = profile.t1;
+    profile.v1             = v_base + kHalf * peak_acc * peak_acc / cfg.jm;
+    profile.x1             = v_base * profile.t1 + kOneSixth * peak_acc * profile.t1 * profile.t1;
+    profile.total_time     = 2.0f * profile.t1;
+    profile.total_distance = (v_base + vp) * profile.t1;
+    return profile;
+}
+
+[[nodiscard]] float EvaluateFastEvalDistance(const FastEvalConfig&  cfg,
+                                             const FastEvalProfile& profile,
+                                             const float            t)
+{
+    if (t <= kZero)
+        return 0;
+
+    if (t < profile.t1)
+        return profile.v_base * t + kOneSixth * cfg.jm * t * t * t;
+
+    if (profile.has_uniform && t < profile.t2)
+    {
+        const float dt = t - profile.t1;
+        return profile.x1 + profile.v1 * dt + kHalf * cfg.am * dt * dt;
+    }
+
+    if (t < profile.total_time)
+    {
+        const float dt = profile.total_time - t;
+        return profile.total_distance - profile.vp * dt + kOneSixth * cfg.jm * dt * dt * dt;
+    }
+
+    return profile.total_distance;
+}
+
+[[nodiscard]] float EvaluateSideDistance(const FastEvalConfig& cfg,
+                                         const FastEvalSide&   side,
+                                         const float           vp)
+{
+    if (vp <= side.v_base)
+        return side.x_pre;
+
+    const FastEvalProfile profile = BuildFastEvalProfile(cfg, side.v_base, vp);
+    const float           shift_distance =
+            EvaluateFastEvalDistance(cfg, profile, side.t_shift);
+
+    return side.x_pre + profile.total_distance - shift_distance;
+}
+
+[[nodiscard]] FastEvalResult EvaluateDistanceDelta(const FastEvalConfig& cfg,
+                                                   const FastEvalSide&   start,
+                                                   const FastEvalSide&   end,
+                                                   const float           len,
+                                                   const float           vp)
+{
+    FastEvalResult result{};
+    result.dx1   = EvaluateSideDistance(cfg, start, vp);
+    result.dx3   = EvaluateSideDistance(cfg, end, vp);
+    result.delta = result.dx1 + result.dx3 - len;
+    return result;
+}
+} // namespace
+
 SCurveProfile::SCurveAccel::SCurveAccel() :
     has_uniform_(false), vs_(0), jm_(0), total_time_(0), total_distance_(0), t1_(0), x1_(0), v1_(0),
     t2_(0), ap_(0), vp_(0)
@@ -265,94 +395,19 @@ SCurveProfile::SCurveProfile(const Config& cfg,
         return;
     }
 
-    const float am2        = am * am;
-    const float t_jerk     = am / jm;
-    const float inv_2am    = 0.5f / am;
-    const float one_over_6 = 1.0f / 6.0f;
-
-    const auto evaluate_side_dx = [am, jm, am2, t_jerk, inv_2am, one_over_6](const float v_base,
-                                                                              const float x_pre,
-                                                                              const float ts,
-                                                                              const float vp) {
-        const float dv = vp - v_base;
-        if (dv <= 0)
-            return x_pre;
-
-        if (jm * dv > am2)
-        {
-            const float t1         = t_jerk;
-            const float t2         = dv / am;
-            const float total_time = t2 + t1;
-            const float v1         = v_base + 0.5f * am * t1;
-            const float x1         = v_base * t1 + one_over_6 * am * t1 * t1;
-            const float total_dist = (vp * vp - v_base * v_base) * inv_2am + 0.5f * (v_base + vp) * t1;
-
-            float x_ts = 0;
-            if (ts > 0)
-            {
-                if (ts < t1)
-                {
-                    x_ts = v_base * ts + one_over_6 * jm * ts * ts * ts;
-                }
-                else if (ts < t2)
-                {
-                    const float dt = ts - t1;
-                    x_ts           = x1 + v1 * dt + 0.5f * am * dt * dt;
-                }
-                else if (ts < total_time)
-                {
-                    const float dt = total_time - ts;
-                    x_ts           = total_dist - vp * dt + one_over_6 * jm * dt * dt * dt;
-                }
-                else
-                {
-                    x_ts = total_dist;
-                }
-            }
-
-            return x_pre + total_dist - x_ts;
-        }
-
-        const float ap         = sqrtf(jm * dv);
-        const float t1         = ap / jm;
-        const float total_time = 2.0f * t1;
-        const float total_dist = (v_base + vp) * t1;
-
-        float x_ts = 0;
-        if (ts > 0)
-        {
-            if (ts < t1)
-            {
-                x_ts = v_base * ts + one_over_6 * jm * ts * ts * ts;
-            }
-            else if (ts < total_time)
-            {
-                const float dt = total_time - ts;
-                x_ts           = total_dist - vp * dt + one_over_6 * jm * dt * dt * dt;
-            }
-            else
-            {
-                x_ts = total_dist;
-            }
-        }
-
-        return x_pre + total_dist - x_ts;
+    const FastEvalConfig fast_eval_cfg{
+        am,
+        jm,
+        am * am,
+        am / jm,
+        0.5f / am,
     };
-
-    auto evaluate_delta = [&evaluate_side_dx, &start, &endr, len](const float vp, float* dx1_out, float* dx3_out) {
-        const float dx1 = evaluate_side_dx(start.v_base, start.x_pre, start.t_shift, vp);
-        const float dx3 = evaluate_side_dx(endr.v_base, endr.x_pre, endr.t_shift, vp);
-        if (dx1_out != nullptr)
-            *dx1_out = dx1;
-        if (dx3_out != nullptr)
-            *dx3_out = dx3;
-        return dx1 + dx3 - len;
-    };
+    const FastEvalSide start_eval{start.v_base, start.x_pre, start.t_shift};
+    const FastEvalSide end_eval{endr.v_base, endr.x_pre, endr.t_shift};
 
     // 首先假定存在匀速段
-    float dx1_vm = 0, dx3_vm = 0;
-    const float delta_vm = evaluate_delta(vm, &dx1_vm, &dx3_vm);
-    const float x_const = -delta_vm;
+    const FastEvalResult vm_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vm);
+    const float          x_const = -vm_eval.delta;
     if (x_const > 0)
     {
         process1_.init(start.v_base, vm, am, jm);
@@ -370,7 +425,7 @@ SCurveProfile::SCurveProfile(const Config& cfg,
         t2_                 = t1_ + t_const;
         total_time_         = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
 
-        x1_ = xs_ + direction_ * dx1_vm;
+        x1_ = xs_ + direction_ * vm_eval.dx1;
 
         vp_ = vm;
 
@@ -390,8 +445,9 @@ SCurveProfile::SCurveProfile(const Config& cfg,
 #ifdef DEBUG
         binary_search_count_++;
 #endif
-        const float mid = 0.5f * (l + r);
-        delta_d         = evaluate_delta(mid, nullptr, nullptr);
+        const float          mid      = 0.5f * (l + r);
+        const FastEvalResult mid_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
+        delta_d                      = mid_eval.delta;
         if (fabsf(delta_d) <= S_CURVE_MAX_BS_ERROR)
         {
             r = l = mid;
