@@ -2,20 +2,15 @@
 
 面向嵌入式运动控制的速度规划模块集合。
 
-## 模块概览
+本模块用于为底盘与运动控制提供速度规划能力，当前主要包含带约束的 S 曲线速度规划实现。
 
-- `Core/`：公共接口定义，目前包含 `IVelocityProfile`；
-- `SCurve/`：带初末状态约束的 S 曲线速度规划实现与仿真工具。
+## 说明
 
-## 构建
+- 本库作为上层工程中的功能模块使用，不作为独立编译单元维护；
+- 顶层文档仅说明模块定位与目录结构，具体算法、接口与验证方式见各子目录内文档；
+- 实际接入时应结合所属控制模块、调度周期与执行器约束一起使用。
 
-- `cmake -S . -B build`
-- `cmake --build build`
-- `cmake --build build --target VelocityProfileSCurve`
+## 目录
 
-## 文档与验证
-
-- `SCurve/README.md`：模块介绍、轨迹组成和使用方式；
-- `SCurve/src/带初末状态约束的 S 形曲线路径规划.md`：算法推导说明；
-- `SCurve/simulation/plot_display.py`：单轴曲线验证；
-- `SCurve/simulation/plot_chassis_display.py`：底盘运动验证。
+- `Core/`：公共接口与基础定义；
+- `SCurve/`：S 曲线速度规划实现及相关说明。
