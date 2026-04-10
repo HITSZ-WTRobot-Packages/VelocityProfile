@@ -45,13 +45,37 @@ def chassis_plot(start: Posture,
                  start_accel: Acceleration,
                  x_limit: Limit,
                  y_limit: Limit,
-                 yaw_limit: Limit) -> None:
+                 yaw_limit: Limit,
+                 end_velocity: Velocity = None,
+                 end_accel: Acceleration = None) -> None:
     sx = SCurve()
-    sx.init(start.x, end.x, start_velocity.vx, start_accel.ax, x_limit.v_max, x_limit.a_max, x_limit.j_max)
+    if end_velocity is None:
+        end_velocity = Velocity(vx=0.0, vy=0.0, wz=0.0)
+    if end_accel is None:
+        end_accel = Acceleration(ax=0.0, ay=0.0, ayaw=0.0)
+
+    ret = sx.init(start.x, end.x, start_velocity.vx, start_accel.ax,
+                  x_limit.v_max, x_limit.a_max, x_limit.j_max,
+                  end_velocity.vx, end_accel.ax)
+    if ret == sx.S_CURVE_FAILED:
+        print("sx init failed")
+        return
+
     sy = SCurve()
-    sy.init(start.y, end.y, start_velocity.vy, start_accel.ay, y_limit.v_max, y_limit.a_max, y_limit.j_max)
+    ret = sy.init(start.y, end.y, start_velocity.vy, start_accel.ay,
+                  y_limit.v_max, y_limit.a_max, y_limit.j_max,
+                  end_velocity.vy, end_accel.ay)
+    if ret == sy.S_CURVE_FAILED:
+        print("sy init failed")
+        return
+
     syaw = SCurve()
-    syaw.init(start.yaw, end.yaw, start_velocity.wz, start_accel.ayaw, yaw_limit.v_max, yaw_limit.a_max, yaw_limit.j_max)
+    ret = syaw.init(start.yaw, end.yaw, start_velocity.wz, start_accel.ayaw,
+                    yaw_limit.v_max, yaw_limit.a_max, yaw_limit.j_max,
+                    end_velocity.wz, end_accel.ayaw)
+    if ret == syaw.S_CURVE_FAILED:
+        print("syaw init failed")
+        return
 
     def p_in_w(t) -> Posture:
         return start + Posture(
@@ -237,6 +261,8 @@ if __name__ == "__main__":
         end=Posture(x=3, y=1, yaw=0),
         start_velocity=Velocity(vx=0, vy=0, wz=0),
         start_accel=Acceleration(ax=0, ay=0, ayaw=0),
+        end_velocity=Velocity(vx=0.5, vy=0.2, wz=0.0),
+        end_accel=Acceleration(ax=0.1, ay=0.05, ayaw=0.0),
         x_limit=Limit(v_max=5, a_max=1.5, j_max=2),
         y_limit=Limit(v_max=5, a_max=1.5, j_max=2),
         yaw_limit=Limit(v_max=180, a_max=60, j_max=360)
