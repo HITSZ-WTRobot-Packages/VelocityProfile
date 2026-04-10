@@ -1,6 +1,6 @@
 /**
  * @file    s_curve.hpp
- * @author  syhanjin
+ * @author  syhanjin LIJunHong659
  * @date    2026-01-28
  */
 #ifndef S_CURVE_HPP
@@ -80,7 +80,7 @@ public:
     [[nodiscard]] float getTotalTime() const override { return total_time_; }
 
     /// @brief 判断当前边界条件下是否成功构造出可行轨迹。
-    [[nodiscard]] bool  success() const override { return success_; }
+    [[nodiscard]] bool success() const override { return success_; }
 
 private:
     /**
@@ -110,20 +110,20 @@ private:
         [[nodiscard]] float getTotalTime() const { return total_time_; }
 
     private:
-        bool  has_uniform_;    ///< 是否存在匀加速平台。
-        float vs_;             ///< 该标准过程的起始速度。
-        float jm_;             ///< 该标准过程使用的固定加加速度。
+        bool  has_uniform_; ///< 是否存在匀加速平台。
+        float vs_;          ///< 该标准过程的起始速度。
+        float jm_;          ///< 该标准过程使用的固定加加速度。
 
         float total_time_;     ///< 单边过程总时长。
         float total_distance_; ///< 单边过程总位移。
 
-        float t1_;             ///< 加加速段结束时刻。
-        float x1_;             ///< 加加速段结束时累计位移。
-        float v1_;             ///< 加加速段结束时速度。
-        float t2_;             ///< 匀加速段结束时刻；无匀加速段时与 t1_ 相等。
+        float t1_; ///< 加加速段结束时刻。
+        float x1_; ///< 加加速段结束时累计位移。
+        float v1_; ///< 加加速段结束时速度。
+        float t2_; ///< 匀加速段结束时刻；无匀加速段时与 t1_ 相等。
 
-        float ap_;             ///< 峰值加速度。
-        float vp_;             ///< 过程目标峰值速度。
+        float ap_; ///< 峰值加速度。
+        float vp_; ///< 过程目标峰值速度。
     };
 
     /**
@@ -146,26 +146,26 @@ private:
     float jm_;        ///< 当前轨迹使用的加加速度上限。
     float vp_;        ///< 当前轨迹的实际峰值速度。
 
-    float xs_;        ///< 原始坐标系下的起点位置。
-    float xe_;        ///< 原始坐标系下的终点位置。
-    float ve_;        ///< 归一化后的终点速度。
-    float ae_;        ///< 归一化后的终点加速度。
+    float xs_; ///< 原始坐标系下的起点位置。
+    float xe_; ///< 原始坐标系下的终点位置。
+    float ve_; ///< 归一化后的终点速度。
+    float ae_; ///< 归一化后的终点加速度。
 
-    float vs_;        ///< 归一化后的起点速度。
-    float as_;        ///< 归一化后的起点加速度。
-    float t1_pre_;    ///< 起点显式预处理时长。
-    float x1_pre_;    ///< 起点预处理结束后的绝对位置。
-    float ts1_;       ///< 起点过程的时间偏移。
-    float xs1_;       ///< 起点过程的位移基准。
+    float vs_;     ///< 归一化后的起点速度。
+    float as_;     ///< 归一化后的起点加速度。
+    float t1_pre_; ///< 起点显式预处理时长。
+    float x1_pre_; ///< 起点预处理结束后的绝对位置。
+    float ts1_;    ///< 起点过程的时间偏移。
+    float xs1_;    ///< 起点过程的位移基准。
 
-    float t3_pre_;    ///< 末端过程预处理时长。
-    float x3_pre_;    ///< 末端过程预处理位移。
-    float ts3_;       ///< 末端过程的时间偏移。
-    float xs3_;       ///< 末端过程的位移基准。
+    float t3_pre_; ///< 末端过程预处理时长。
+    float x3_pre_; ///< 末端过程预处理位移。
+    float ts3_;    ///< 末端过程的时间偏移。
+    float xs3_;    ///< 末端过程的位移基准。
 
-    float t1_;        ///< 第一阶段结束时刻。
-    float t2_;        ///< 第二阶段结束时刻。
-    float x1_;        ///< 阶段切换位置。
+    float t1_; ///< 第一阶段结束时刻。
+    float t2_; ///< 第二阶段结束时刻。
+    float x1_; ///< 阶段切换位置。
 
     float total_time_; ///< 整条轨迹总时长。
 

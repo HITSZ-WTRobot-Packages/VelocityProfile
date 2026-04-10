@@ -1,12 +1,11 @@
 /**
  * @file    s_curve.cpp
- * @author  
+ * @author  syhanjin LIJunHong659
  * @date    2026-04-09
  */
 #include "s_curve.hpp"
 
 #include <cmath>
-
 
 namespace velocity_profile
 {
@@ -19,17 +18,17 @@ namespace
  * 为了让这一判断可以在二分搜索中高频执行，这里提供一套只关注位移估算的轻量结构，
  * 避免在每次试探峰值速度时都完整初始化 SCurveAccel 对象。
  */
-constexpr float kHalf      = 0.5f;
-constexpr float kOneSixth  = 1.0f / 6.0f;
-constexpr float kZero      = 0.0f;
+constexpr float kHalf     = 0.5f;
+constexpr float kOneSixth = 1.0f / 6.0f;
+constexpr float kZero     = 0.0f;
 
 struct FastEvalConfig
 {
-    float am;              ///< 最大加速度。
-    float jm;              ///< 最大加加速度。
-    float am_square;       ///< am^2，避免在循环内重复乘法。
-    float jerk_ramp_time;  ///< 从 0 提升到最大加速度所需时长 am / jm。
-    float inv_double_am;   ///< 1 / (2 * am)，用于距离公式复用。
+    float am;             ///< 最大加速度。
+    float jm;             ///< 最大加加速度。
+    float am_square;      ///< am^2，避免在循环内重复乘法。
+    float jerk_ramp_time; ///< 从 0 提升到最大加速度所需时长 am / jm。
+    float inv_double_am;  ///< 1 / (2 * am)，用于距离公式复用。
 };
 
 struct FastEvalSide
@@ -41,15 +40,15 @@ struct FastEvalSide
 
 struct FastEvalProfile
 {
-    bool  has_uniform;     ///< 是否存在匀加速段。
-    float v_base;          ///< 过程起始速度。
-    float vp;              ///< 候选峰值速度。
-    float t1;              ///< 加加速段结束时刻。
-    float t2;              ///< 匀加速段结束时刻；三角曲线时与 t1 相同。
-    float x1;              ///< 加加速段结束位移。
-    float v1;              ///< 加加速段结束速度。
-    float total_time;      ///< 单边过程总时长。
-    float total_distance;  ///< 单边过程总位移。
+    bool  has_uniform;    ///< 是否存在匀加速段。
+    float v_base;         ///< 过程起始速度。
+    float vp;             ///< 候选峰值速度。
+    float t1;             ///< 加加速段结束时刻。
+    float t2;             ///< 匀加速段结束时刻；三角曲线时与 t1 相同。
+    float x1;             ///< 加加速段结束位移。
+    float v1;             ///< 加加速段结束速度。
+    float total_time;     ///< 单边过程总时长。
+    float total_distance; ///< 单边过程总位移。
 };
 
 struct FastEvalResult
@@ -74,12 +73,12 @@ struct FastEvalResult
 
     if (cfg.jm * delta_v > cfg.am_square)
     {
-        profile.has_uniform   = true;
-        profile.t1            = cfg.jerk_ramp_time;
-        profile.t2            = delta_v / cfg.am;
-        profile.v1            = v_base + kHalf * cfg.am * profile.t1;
-        profile.x1            = v_base * profile.t1 + kOneSixth * cfg.am * profile.t1 * profile.t1;
-        profile.total_time    = profile.t2 + profile.t1;
+        profile.has_uniform    = true;
+        profile.t1             = cfg.jerk_ramp_time;
+        profile.t2             = delta_v / cfg.am;
+        profile.v1             = v_base + kHalf * cfg.am * profile.t1;
+        profile.x1             = v_base * profile.t1 + kOneSixth * cfg.am * profile.t1 * profile.t1;
+        profile.total_time     = profile.t2 + profile.t1;
         profile.total_distance = (vp * vp - v_base * v_base) * cfg.inv_double_am +
                                  kHalf * (v_base + vp) * profile.t1;
         return profile;
@@ -139,9 +138,8 @@ struct FastEvalResult
     if (vp <= side.v_base)
         return side.x_pre;
 
-    const FastEvalProfile profile = BuildFastEvalProfile(cfg, side.v_base, vp);
-    const float           shift_distance =
-            EvaluateFastEvalDistance(cfg, profile, side.t_shift);
+    const FastEvalProfile profile        = BuildFastEvalProfile(cfg, side.v_base, vp);
+    const float           shift_distance = EvaluateFastEvalDistance(cfg, profile, side.t_shift);
 
     return side.x_pre + profile.total_distance - shift_distance;
 }
@@ -193,14 +191,14 @@ void SCurveProfile::SCurveAccel::init(const float vs,
     vs_          = vs;
     vp_          = vp;
     jm_          = jm;
-    if (has_uniform_)                       // 梯形加速曲线（存在匀加速段）
+    if (has_uniform_) // 梯形加速曲线（存在匀加速段）
     {
         ap_ = am;
 
-        t1_             = am / jm;          // 加加速段时长
-        t2_             = (vp - vs) / am;   // 加加速度段与减加速段时刻分界（加加速度+匀加速度一共的时间）
+        t1_ = am / jm;        // 加加速段时长
+        t2_ = (vp - vs) / am; // 加加速度段与减加速段时刻分界（加加速度+匀加速度一共的时间）
 
-        v1_ = vs + 0.5f * am * t1_;         // 加加速段与匀加速段速度分界
+        v1_ = vs + 0.5f * am * t1_; // 加加速段与匀加速段速度分界
 
         x1_ = vs * t1_ + 1 / 6.0f * am * t1_ * t1_;
 
@@ -208,12 +206,12 @@ void SCurveProfile::SCurveAccel::init(const float vs,
         total_distance_ = (vp * vp - vs * vs) / (2.0f * am) +
                           0.5f * (vs + vp) * t1_ /*(vs + vp) * am / (2.0f * jm)*/;
     }
-    else                                    // 三角加速曲线（无匀加速段）   
+    else // 三角加速曲线（无匀加速段）
     {
-        ap_ =  sqrtf(jm * (vp - vs));
+        ap_ = sqrtf(jm * (vp - vs));
 
         t1_ = ap_ / jm;
-        t2_ = t1_;                          // 没有匀加速段
+        t2_ = t1_; // 没有匀加速段
 
         v1_ = vs + 0.5f * ap_ * ap_ / jm;
 
@@ -289,18 +287,13 @@ float SCurveProfile::SCurveAccel::getAcceleration(const float t) const
  *
  * 求解完成后，轨迹采样阶段再根据时刻落在哪个区间，分别调用起点过程、匀速段或终点逆过程。
  */
-SCurveProfile::SCurveProfile(const Config& cfg,
-                             float         xs,
-                             float         vs,
-                             float         as,
-                             float         xe,
-                             float         ve,
-                             float         ae)
+SCurveProfile::SCurveProfile(
+        const Config& cfg, float xs, float vs, float as, float xe, float ve, float ae)
 {
     // 约束全部按绝对值解释，方向统一由起终点位置决定。
-    auto vm =  fabsf(cfg.max_spd);
-    auto am =  fabsf(cfg.max_acc);
-    auto jm =  fabsf(cfg.max_jerk);
+    auto vm = fabsf(cfg.max_spd);
+    auto am = fabsf(cfg.max_acc);
+    auto jm = fabsf(cfg.max_jerk);
 
     // 全部折算到“正向移动”求解，最后再通过 direction_ 恢复原始方向。
     const float dir = xe > xs ? 1.0f : -1.0f;
@@ -322,12 +315,12 @@ SCurveProfile::SCurveProfile(const Config& cfg,
     // 若位移接近 0，则只有“初末速度和加速度也完全一致”才算可行静止解。
     if (len < 1e-6f)
     {
-        if ( fabsf(vs - ve) > 1e-3f ||  fabsf(as - ae) > 1e-3f)
+        if (fabsf(vs - ve) > 1e-3f || fabsf(as - ae) > 1e-3f)
         {
             success_ = false;
             return;
         }
-        t1_pre_         = 0;
+        t1_pre_     = 0;
         t1_         = 0;
         has_const_  = false;
         t2_         = 0;
@@ -342,7 +335,7 @@ SCurveProfile::SCurveProfile(const Config& cfg,
         return;
     }
 
-    if ( fabsf(vs) > vm ||  fabsf(as) > am ||  fabsf(ve) > vm ||  fabsf(ae) > am)
+    if (fabsf(vs) > vm || fabsf(as) > am || fabsf(ve) > vm || fabsf(ae) > am)
     {
         // 初末边界本身已经违反约束时，不存在可行解。
         success_ = false;
@@ -361,7 +354,8 @@ SCurveProfile::SCurveProfile(const Config& cfg,
      * - 进入内部单边加速器时的等效基线速度；
      * - 该侧允许的峰值速度下界。
      */
-    const auto prepareSide = [vm, jm](const float v0, const float a0) {
+    const auto prepareSide = [vm, jm](const float v0, const float a0)
+    {
         SidePrepare ret{};
         ret.valid = true;
         // 两条路径：
@@ -375,17 +369,17 @@ SCurveProfile::SCurveProfile(const Config& cfg,
             // v_base = v0 - a0^2 / (2 * jm)
             ret.v_base = v0 - 0.5f * a0 * a0 / jm;
             // 若抬加速度后的速度超过最大速度约束，则本侧无效
-            if ( fabsf(ret.v_base) > vm)
+            if (fabsf(ret.v_base) > vm)
             {
                 ret.valid = false;
                 return ret;
             }
             // 抬加速后该侧对 vp 的下界就是 v_base
-            ret.vp_min  = ret.v_base;
+            ret.vp_min = ret.v_base;
             // 预处理时长 t_pre = -a0 / jm（把加速度升到 0 所需时间）
-            ret.t_pre   = -a0 / jm;
+            ret.t_pre = -a0 / jm;
             // 预处理位移 x_pre = v0 * t_pre + (1/3) * a0 * t_pre^2
-            ret.x_pre   = v0 * ret.t_pre + 1 / 3.0f * a0 * ret.t_pre * ret.t_pre;
+            ret.x_pre = v0 * ret.t_pre + 1 / 3.0f * a0 * ret.t_pre * ret.t_pre;
             // 时间平移为 0（无时间平移）
             ret.t_shift = 0;
         }
@@ -401,12 +395,12 @@ SCurveProfile::SCurveProfile(const Config& cfg,
                 return ret;
             }
             // 无显式预处理
-            ret.t_pre   = 0;
-            ret.x_pre   = 0;
+            ret.t_pre = 0;
+            ret.x_pre = 0;
             // 时间平移 t_shift = a0 / jm（在 SCurve 内跳过相应的前段）
             ret.t_shift = a0 / jm;
             // 等效起始速度 v_base = v0 - 0.5 * a0 * t_shift （与抬加速表达等价）
-            ret.v_base  = v0 - 0.5f * a0 * ret.t_shift;
+            ret.v_base = v0 - 0.5f * a0 * ret.t_shift;
         }
         // 下界不能为负（将其截为 0）
         if (ret.vp_min < 0)
@@ -429,15 +423,15 @@ SCurveProfile::SCurveProfile(const Config& cfg,
         return;
     }
 
-    t1_pre_     = start.t_pre;
-    x1_pre_     = xs + dir * start.x_pre;
+    t1_pre_ = start.t_pre;
+    x1_pre_ = xs + dir * start.x_pre;
     ts1_    = start.t_shift;
     t3_pre_ = endr.t_pre;
     x3_pre_ = endr.x_pre;
     ts3_    = endr.t_shift;
 
     // 峰值速度必须同时满足起点侧和终点侧的最低要求。
-    float vp_min =  fmaxf(start.vp_min, endr.vp_min);
+    float vp_min = fmaxf(start.vp_min, endr.vp_min);
     if (vp_min < 0)
         vp_min = 0;
     if (vm < vp_min)
@@ -456,19 +450,16 @@ SCurveProfile::SCurveProfile(const Config& cfg,
     }
 
     const FastEvalConfig fast_eval_cfg{
-        am,
-        jm,
-        am * am,
-        am / jm,
-        0.5f / am,
+        am, jm, am * am, am / jm, 0.5f / am,
     };
-    const FastEvalSide start_eval{start.v_base, start.x_pre, start.t_shift};
-    const FastEvalSide end_eval{endr.v_base, endr.x_pre, endr.t_shift};
+    const FastEvalSide start_eval{ start.v_base, start.x_pre, start.t_shift };
+    const FastEvalSide end_eval{ endr.v_base, endr.x_pre, endr.t_shift };
 
     // 先尝试“峰值速度能到 vm，并且中间还留有匀速段”的情况。
     // 若此时两侧过程消耗的位移仍小于总位移，则剩余部分就是匀速段。
-    const FastEvalResult vm_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vm);
-    const float          x_const = -vm_eval.delta;
+    const FastEvalResult vm_eval =
+            EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vm);
+    const float x_const = -vm_eval.delta;
     if (x_const > 0)
     {
         process1_.init(start.v_base, vm, am, jm);
@@ -507,9 +498,10 @@ SCurveProfile::SCurveProfile(const Config& cfg,
 #ifdef DEBUG
         binary_search_count_++;
 #endif
-        const float          mid      = 0.5f * (l + r);
-        const FastEvalResult mid_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
-        delta_d                      = mid_eval.delta;
+        const float          mid = 0.5f * (l + r);
+        const FastEvalResult mid_eval =
+                EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
+        delta_d = mid_eval.delta;
         if (fabsf(delta_d) <= S_CURVE_MAX_BS_ERROR)
         {
             r = l = mid;
