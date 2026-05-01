@@ -312,14 +312,9 @@ SCurveProfile::SCurveProfile(
     ae_ = ae;
     jm_ = jm;
 
-    // 若位移接近 0，则只有“初末速度和加速度也完全一致”才算可行静止解。
-    if (len < 1e-6f)
+    // 如果距离很小，且初末速度/加速度都比较相近，直接返回
+    if (len < 1e-3f && fabsf(ve - vs) < 1e-3f && fabsf(ae - as) < 1e-3f)
     {
-        if (fabsf(vs - ve) > 1e-3f || fabsf(as - ae) > 1e-3f)
-        {
-            success_ = false;
-            return;
-        }
         t1_pre_     = 0;
         t1_         = 0;
         has_const_  = false;

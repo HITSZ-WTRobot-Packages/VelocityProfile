@@ -22,7 +22,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-
 S_CURVE_MAX_BS_ERROR = 0.001
 
 
@@ -84,8 +83,8 @@ def _build_fast_eval_profile(cfg: FastEvalConfig, v_base: float, vp: float) -> F
         profile.x1 = v_base * profile.t1 + (1.0 / 6.0) * cfg.am * profile.t1 * profile.t1
         profile.total_time = profile.t2 + profile.t1
         profile.total_distance = (
-            (vp * vp - v_base * v_base) * cfg.inv_double_am
-            + 0.5 * (v_base + vp) * profile.t1
+                (vp * vp - v_base * v_base) * cfg.inv_double_am
+                + 0.5 * (v_base + vp) * profile.t1
         )
         return profile
 
@@ -101,9 +100,9 @@ def _build_fast_eval_profile(cfg: FastEvalConfig, v_base: float, vp: float) -> F
 
 
 def _evaluate_fast_eval_distance(
-    cfg: FastEvalConfig,
-    profile: FastEvalProfile,
-    t: float,
+        cfg: FastEvalConfig,
+        profile: FastEvalProfile,
+        t: float,
 ) -> float:
     if t <= 0.0:
         return 0.0
@@ -132,11 +131,11 @@ def _evaluate_side_distance(cfg: FastEvalConfig, side: FastEvalSide, vp: float) 
 
 
 def _evaluate_distance_delta(
-    cfg: FastEvalConfig,
-    start: FastEvalSide,
-    end: FastEvalSide,
-    length: float,
-    vp: float,
+        cfg: FastEvalConfig,
+        start: FastEvalSide,
+        end: FastEvalSide,
+        length: float,
+        vp: float,
 ) -> FastEvalResult:
     result = FastEvalResult()
     result.dx1 = _evaluate_side_distance(cfg, start, vp)
@@ -173,8 +172,8 @@ class SCurveAccel:
             self.x1 = vs * self.t1 + (1.0 / 6.0) * am * self.t1 * self.t1
             self.total_time = self.t2 + self.t1
             self.total_distance = (
-                (vp * vp - vs * vs) / (2.0 * am)
-                + 0.5 * (vs + vp) * self.t1
+                    (vp * vp - vs * vs) / (2.0 * am)
+                    + 0.5 * (vs + vp) * self.t1
             )
             return
 
@@ -286,16 +285,16 @@ class SCurve:
         )
 
     def init(
-        self,
-        xs: float,
-        xe: float,
-        vs: float,
-        as_: float,
-        vm: float,
-        am: float,
-        jm: float,
-        ve: float = 0.0,
-        ae: float = 0.0,
+            self,
+            xs: float,
+            xe: float,
+            vs: float,
+            as_: float,
+            vm: float,
+            am: float,
+            jm: float,
+            ve: float = 0.0,
+            ae: float = 0.0,
     ) -> int:
         self._reset_state()
         self.process1 = SCurveAccel()
@@ -324,10 +323,7 @@ class SCurve:
         self.vrs = ve
         self.ars = -ae
 
-        if length < 1e-6:
-            if abs(vs - ve) > 1e-3 or abs(as_ - ae) > 1e-3:
-                return self.S_CURVE_FAILED
-
+        if length < 1e-3 and abs(vs - ve) < 1e-3 and abs(as_ - ae) < 1e-3:
             self.x1_pre = xs
             self.x1 = xs
             self.x2 = xs
@@ -501,11 +497,11 @@ class SCurve:
             t2 = t * t
             t3 = t2 * t
             return self.xs + self.direction * (
-                self.vs * t + 0.5 * self.as_ * t2 + (1.0 / 6.0) * self.jm * t3
+                    self.vs * t + 0.5 * self.as_ * t2 + (1.0 / 6.0) * self.jm * t3
             )
         if t < self.t1:
             return self.x1_pre + self.direction * (
-                self.process1.get_distance(t - self.t1_pre + self.ts1) - self.xs1
+                    self.process1.get_distance(t - self.t1_pre + self.ts1) - self.xs1
             )
         if self.has_const and t < self.t2:
             return self.x1 + self.direction * self.vp * (t - self.t1)
