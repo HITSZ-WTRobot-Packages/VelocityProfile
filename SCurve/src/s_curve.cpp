@@ -313,7 +313,9 @@ SCurveProfile::SCurveProfile(
     jm_ = jm;
 
     // 如果距离很小，且初末速度/加速度都比较相近，直接返回
-    if (len < 1e-3f && fabsf(ve - vs) < 1e-3f && fabsf(ae - as) < 1e-3f)
+    // if (len < 1e-3f && fabsf(ve - vs) < 1e-3f && fabsf(ae - as) < 1e-3f)
+    // TODO: 查找有轻微初速度情况下规划失败的问题；由于暂时没启用末速度，所以此判断先回滚
+    if (len < 1e-3f)
     {
         t1_pre_     = 0;
         t1_         = 0;
