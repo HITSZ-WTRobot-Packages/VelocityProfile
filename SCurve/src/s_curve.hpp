@@ -39,6 +39,15 @@ public:
         float max_spd;  ///< 速度上限。
         float max_acc;  ///< 加速度上限。
         float max_jerk; ///< 加加速度上限。
+
+        constexpr Config operator*(const float ratio) const
+        {
+            return { max_spd * ratio, max_acc * ratio, max_jerk * ratio };
+        }
+        constexpr Config operator/(const float factor) const
+        {
+            return { max_spd / factor, max_acc / factor, max_jerk / factor };
+        }
     };
 
     /**
