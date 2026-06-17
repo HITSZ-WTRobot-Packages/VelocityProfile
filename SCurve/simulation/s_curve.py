@@ -1,28 +1,19 @@
 # -*- coding: utf-8 -*-
 
-"""
-本文件是通过 AI 将 s_curve.c 转换得来
---------------------------------------------------------------------------
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 S_CURVE_MAX_BS_ERROR = 0.001
+EPS = 1.0e-6
+
+
+@dataclass(slots=True)
+class BoundaryState:
+    x: float
+    v: float
+    a: float
 
 
 @dataclass(slots=True)
@@ -71,9 +62,92 @@ class FastEvalResult:
     delta: float = 0.0
 
 
+@dataclass(slots=True)
+class PrefixPlan:
+    x0: float = 0.0
+    v0: float = 0.0
+    a0: float = 0.0
+    j_ramp: float = 0.0
+    j_settle: float = 0.0
+    t_ramp: float = 0.0
+    t_hold: float = 0.0
+    t_settle: float = 0.0
+    x_ramp: float = 0.0
+    v_ramp: float = 0.0
+    a_ramp: float = 0.0
+    x_hold: float = 0.0
+    v_hold: float = 0.0
+    a_hold: float = 0.0
+    total_time: float = 0.0
+    end_x: float = 0.0
+    end_v: float = 0.0
+    end_a: float = 0.0
+    valid: bool = False
+
+
+@dataclass(slots=True)
+class MotionCore:
+    valid: bool = False
+    has_const: bool = False
+    direction: float = 1.0
+    xs: float = 0.0
+    xe: float = 0.0
+    vs: float = 0.0
+    as_: float = 0.0
+    ve: float = 0.0
+    ae: float = 0.0
+    jm: float = 0.0
+    vp: float = 0.0
+    t1_pre: float = 0.0
+    x1_pre: float = 0.0
+    ts1: float = 0.0
+    xs1: float = 0.0
+    t3_pre: float = 0.0
+    x3_pre: float = 0.0
+    ts3: float = 0.0
+    xs3: float = 0.0
+    t1: float = 0.0
+    t2: float = 0.0
+    x1: float = 0.0
+    total_time: float = 0.0
+    process1: 'SCurveAccel' = field(default_factory=lambda: SCurveAccel())
+    process3: 'SCurveAccel' = field(default_factory=lambda: SCurveAccel())
+
+
+@dataclass(slots=True)
+class SuffixPlan:
+    reverse_plan: PrefixPlan = field(default_factory=PrefixPlan)
+    start_x: float = 0.0
+    valid: bool = False
+
+
+def _sign(value: float) -> float:
+    if value > 0.0:
+        return 1.0
+    if value < 0.0:
+        return -1.0
+    return 0.0
+
+
+def _is_finite(*values: float) -> bool:
+    return all(math.isfinite(v) for v in values)
+
+
+def _evaluate_constant_jerk(state: BoundaryState, jerk: float, dt: float) -> BoundaryState:
+    dt2 = dt * dt
+    dt3 = dt2 * dt
+    return BoundaryState(
+        x=state.x + state.v * dt + 0.5 * state.a * dt2 + (1.0 / 6.0) * jerk * dt3,
+        v=state.v + state.a * dt + 0.5 * jerk * dt2,
+        a=state.a + jerk * dt,
+    )
+
+
 def _build_fast_eval_profile(cfg: FastEvalConfig, v_base: float, vp: float) -> FastEvalProfile:
     profile = FastEvalProfile(v_base=v_base, vp=vp)
     delta_v = vp - v_base
+    if delta_v <= 0.0:
+        return profile
 
     if cfg.jm * delta_v > cfg.am_square:
         profile.has_uniform = True
@@ -83,13 +157,12 @@ def _build_fast_eval_profile(cfg: FastEvalConfig, v_base: float, vp: float) -> F
         profile.x1 = v_base * profile.t1 + (1.0 / 6.0) * cfg.am * profile.t1 * profile.t1
         profile.total_time = profile.t2 + profile.t1
         profile.total_distance = (
-                (vp * vp - v_base * v_base) * cfg.inv_double_am
-                + 0.5 * (v_base + vp) * profile.t1
+            (vp * vp - v_base * v_base) * cfg.inv_double_am +
+            0.5 * (v_base + vp) * profile.t1
         )
         return profile
 
     peak_acc = math.sqrt(cfg.jm * delta_v)
-    profile.has_uniform = False
     profile.t1 = peak_acc / cfg.jm
     profile.t2 = profile.t1
     profile.v1 = v_base + 0.5 * peak_acc * peak_acc / cfg.jm
@@ -99,32 +172,23 @@ def _build_fast_eval_profile(cfg: FastEvalConfig, v_base: float, vp: float) -> F
     return profile
 
 
-def _evaluate_fast_eval_distance(
-        cfg: FastEvalConfig,
-        profile: FastEvalProfile,
-        t: float,
-) -> float:
+def _evaluate_fast_eval_distance(cfg: FastEvalConfig, profile: FastEvalProfile, t: float) -> float:
     if t <= 0.0:
         return 0.0
-
     if t < profile.t1:
         return profile.v_base * t + (1.0 / 6.0) * cfg.jm * t * t * t
-
     if profile.has_uniform and t < profile.t2:
         dt = t - profile.t1
         return profile.x1 + profile.v1 * dt + 0.5 * cfg.am * dt * dt
-
     if t < profile.total_time:
         dt = profile.total_time - t
         return profile.total_distance - profile.vp * dt + (1.0 / 6.0) * cfg.jm * dt * dt * dt
-
     return profile.total_distance
 
 
 def _evaluate_side_distance(cfg: FastEvalConfig, side: FastEvalSide, vp: float) -> float:
     if vp <= side.v_base:
         return side.x_pre
-
     profile = _build_fast_eval_profile(cfg, side.v_base, vp)
     shift_distance = _evaluate_fast_eval_distance(cfg, profile, side.t_shift)
     return side.x_pre + profile.total_distance - shift_distance
@@ -135,13 +199,10 @@ def _evaluate_distance_delta(
         start: FastEvalSide,
         end: FastEvalSide,
         length: float,
-        vp: float,
-) -> FastEvalResult:
-    result = FastEvalResult()
-    result.dx1 = _evaluate_side_distance(cfg, start, vp)
-    result.dx3 = _evaluate_side_distance(cfg, end, vp)
-    result.delta = result.dx1 + result.dx3 - length
-    return result
+        vp: float) -> FastEvalResult:
+    dx1 = _evaluate_side_distance(cfg, start, vp)
+    dx3 = _evaluate_side_distance(cfg, end, vp)
+    return FastEvalResult(dx1=dx1, dx3=dx3, delta=dx1 + dx3 - length)
 
 
 class SCurveAccel:
@@ -159,31 +220,41 @@ class SCurveAccel:
         self.vp = 0.0
 
     def init(self, vs: float, vp: float, am: float, jm: float) -> None:
-        self.has_uniform = jm * (vp - vs) > am * am
+        self.has_uniform = False
         self.vs = vs
-        self.vp = vp
         self.jm = jm
+        self.total_time = 0.0
+        self.total_distance = 0.0
+        self.t1 = 0.0
+        self.x1 = 0.0
+        self.v1 = vs
+        self.t2 = 0.0
+        self.ap = 0.0
+        self.vp = vp
 
+        delta_v = vp - vs
+        if delta_v <= 0.0:
+            return
+
+        self.has_uniform = jm * delta_v > am * am
         if self.has_uniform:
             self.ap = am
             self.t1 = am / jm
-            self.t2 = (vp - vs) / am
+            self.t2 = delta_v / am
             self.v1 = vs + 0.5 * am * self.t1
             self.x1 = vs * self.t1 + (1.0 / 6.0) * am * self.t1 * self.t1
             self.total_time = self.t2 + self.t1
-            self.total_distance = (
-                    (vp * vp - vs * vs) / (2.0 * am)
-                    + 0.5 * (vs + vp) * self.t1
-            )
+            self.total_distance = ((vp * vp - vs * vs) / (2.0 * am) +
+                                   0.5 * (vs + vp) * self.t1)
             return
 
-        self.ap = math.sqrt(jm * (vp - vs))
+        self.ap = math.sqrt(jm * delta_v)
         self.t1 = self.ap / jm
         self.t2 = self.t1
         self.v1 = vs + 0.5 * self.ap * self.ap / jm
         self.x1 = vs * self.t1 + (1.0 / 6.0) * self.ap * self.t1 * self.t1
-        self.total_time = 2.0 * math.sqrt((vp - vs) / jm)
-        self.total_distance = (vs + vp) * math.sqrt((vp - vs) / jm)
+        self.total_time = 2.0 * self.t1
+        self.total_distance = (vs + vp) * self.t1
 
     def get_distance(self, t: float) -> float:
         if t <= 0.0:
@@ -221,68 +292,336 @@ class SCurveAccel:
             return self.jm * (self.total_time - t)
         return 0.0
 
-    def __repr__(self) -> str:
-        return (
-            "SCurveAccel(\n"
-            f"    t1: {self.t1}, t2: {self.t2}, total_time: {self.total_time},\n"
-            f"    x1: {self.x1}, total_distance: {self.total_distance},\n"
-            f"    vs: {self.vs}, v1: {self.v1}, vp: {self.vp},\n"
-            f"    ap: {self.ap}, has_uniform: {self.has_uniform}\n"
-            ")"
-        )
-
 
 class SCurve:
     S_CURVE_FAILED = 0
     S_CURVE_SUCCESS = 1
 
     def __init__(self):
-        self.process1 = SCurveAccel()
-        self.process3 = SCurveAccel()
         self._reset_state()
 
     def _reset_state(self) -> None:
         self.success = False
-        self.has_const = False
-        self.direction = 1.0
-        self.vp = 0.0
-        self.vs = 0.0
-        self.as_ = 0.0
-        self.ve = 0.0
-        self.ae = 0.0
-        self.jm = 0.0
-
-        self.xs = 0.0
-        self.xe = 0.0
-        self.t1_pre = 0.0
-        self.x1_pre = 0.0
-        self.ts1 = 0.0
-        self.xs1 = 0.0
-
-        self.vrs = 0.0
-        self.ars = 0.0
-        self.t3_pre = 0.0
-        self.x3_pre = 0.0
-        self.ts3 = 0.0
-        self.xs3 = 0.0
-
-        self.x1 = 0.0
-        self.x2 = 0.0
-
-        self.t1 = 0.0
-        self.t2 = 0.0
         self.total_time = 0.0
+        self.prefix = PrefixPlan()
+        self.main_core = MotionCore()
+        self.suffix = SuffixPlan()
+        self.debug = {
+            "used_prefix": False,
+            "used_suffix": False,
+            "fallback_stop_prefix": False,
+        }
 
-    def __repr__(self) -> str:
-        return (
-            "SCurve(\n"
-            f"    success: {self.success}, has_const: {self.has_const}, direction: {self.direction},\n"
-            f"    vp: {self.vp}, xs: {self.xs}, x1: {self.x1}, x2: {self.x2}, xe: {self.xe},\n"
-            f"    ts1: {self.ts1}, ts3: {self.ts3}, t1: {self.t1}, t2: {self.t2}, total_time: {self.total_time},\n"
-            f"    process1: {self.process1},\n"
-            f"    process3: {self.process3},\n"
-            ")"
+    @staticmethod
+    def _prepare_side(v0: float, a0: float, vm: float, jm: float) -> SidePrepare:
+        result = SidePrepare()
+        if a0 < 0.0:
+            result.v_base = v0 - 0.5 * a0 * a0 / jm
+            if abs(result.v_base) > vm:
+                result.valid = False
+                return result
+            result.vp_min = result.v_base
+            result.t_pre = -a0 / jm
+            result.x_pre = v0 * result.t_pre + (1.0 / 3.0) * a0 * result.t_pre * result.t_pre
+            return result
+
+        result.vp_min = v0 + 0.5 * a0 * a0 / jm
+        if vm < result.vp_min:
+            result.valid = False
+            return result
+        result.t_shift = a0 / jm
+        result.v_base = v0 - 0.5 * a0 * result.t_shift
+        if result.vp_min < 0.0:
+            result.vp_min = 0.0
+        return result
+
+    @staticmethod
+    def _build_stop_prefix(start: BoundaryState, am: float, jm: float) -> PrefixPlan:
+        plan = PrefixPlan()
+        if jm <= 0.0 or am <= 0.0:
+            return plan
+
+        motion_sign = _sign(start.v)
+        if motion_sign == 0.0:
+            motion_sign = _sign(start.a)
+        if motion_sign == 0.0 and abs(start.a) <= EPS:
+            plan.x0 = start.x
+            plan.v0 = start.v
+            plan.a0 = start.a
+            plan.x_ramp = start.x
+            plan.v_ramp = start.v
+            plan.a_ramp = start.a
+            plan.x_hold = start.x
+            plan.v_hold = start.v
+            plan.a_hold = 0.0
+            plan.end_x = start.x
+            plan.end_v = 0.0
+            plan.end_a = 0.0
+            plan.valid = True
+            return plan
+
+        target_acc = -motion_sign * am
+        j1 = jm if target_acc >= start.a else -jm
+        t_ramp = abs(target_acc - start.a) / jm
+        after_ramp = _evaluate_constant_jerk(start, j1, t_ramp)
+        a_hold = after_ramp.a
+
+        t_hold = 0.0
+        if abs(a_hold) > EPS:
+            v_settle = 0.5 * a_hold * a_hold / jm
+            if motion_sign > 0.0 and after_ramp.v > v_settle:
+                t_hold = abs((v_settle - after_ramp.v) / a_hold)
+            elif motion_sign < 0.0 and after_ramp.v < -v_settle:
+                t_hold = abs((-v_settle - after_ramp.v) / a_hold)
+
+        after_hold = _evaluate_constant_jerk(after_ramp, 0.0, t_hold)
+        j3 = -j1
+        t_settle = abs(after_hold.a) / jm
+        end = _evaluate_constant_jerk(after_hold, j3, t_settle)
+
+        plan.x0 = start.x
+        plan.v0 = start.v
+        plan.a0 = start.a
+        plan.j_ramp = j1
+        plan.j_settle = j3
+        plan.t_ramp = t_ramp
+        plan.t_hold = t_hold
+        plan.t_settle = t_settle
+        plan.x_ramp = after_ramp.x
+        plan.v_ramp = after_ramp.v
+        plan.a_ramp = after_ramp.a
+        plan.x_hold = after_hold.x
+        plan.v_hold = after_hold.v
+        plan.a_hold = after_hold.a
+        plan.total_time = t_ramp + t_hold + t_settle
+        plan.end_x = end.x
+        plan.end_v = end.v
+        plan.end_a = end.a
+        plan.valid = _is_finite(plan.total_time, plan.end_x, plan.end_v, plan.end_a)
+        return plan
+
+    @staticmethod
+    def _sample_prefix_x(plan: PrefixPlan, t: float) -> float:
+        if not plan.valid or t <= 0.0:
+            return plan.x0
+        if t < plan.t_ramp:
+            return (plan.x0 + plan.v0 * t + 0.5 * plan.a0 * t * t +
+                    (1.0 / 6.0) * plan.j_ramp * t * t * t)
+        if t < plan.t_ramp + plan.t_hold:
+            dt = t - plan.t_ramp
+            return plan.x_ramp + plan.v_ramp * dt + 0.5 * plan.a_ramp * dt * dt
+        if t < plan.total_time:
+            dt = t - plan.t_ramp - plan.t_hold
+            return (plan.x_hold + plan.v_hold * dt + 0.5 * plan.a_hold * dt * dt +
+                    (1.0 / 6.0) * plan.j_settle * dt * dt * dt)
+        return plan.end_x
+
+    @staticmethod
+    def _sample_prefix_v(plan: PrefixPlan, t: float) -> float:
+        if not plan.valid or t <= 0.0:
+            return plan.v0
+        if t < plan.t_ramp:
+            return plan.v0 + plan.a0 * t + 0.5 * plan.j_ramp * t * t
+        if t < plan.t_ramp + plan.t_hold:
+            dt = t - plan.t_ramp
+            return plan.v_ramp + plan.a_ramp * dt
+        if t < plan.total_time:
+            dt = t - plan.t_ramp - plan.t_hold
+            return plan.v_hold + plan.a_hold * dt + 0.5 * plan.j_settle * dt * dt
+        return plan.end_v
+
+    @staticmethod
+    def _sample_prefix_a(plan: PrefixPlan, t: float) -> float:
+        if not plan.valid or t <= 0.0:
+            return plan.a0
+        if t < plan.t_ramp:
+            return plan.a0 + plan.j_ramp * t
+        if t < plan.t_ramp + plan.t_hold:
+            return plan.a_ramp
+        if t < plan.total_time:
+            dt = t - plan.t_ramp - plan.t_hold
+            return plan.a_hold + plan.j_settle * dt
+        return plan.end_a
+
+    def _solve_core(
+            self,
+            start: BoundaryState,
+            end: BoundaryState,
+            vm: float,
+            am: float,
+            jm: float) -> MotionCore | None:
+        core = MotionCore()
+        direction = 1.0 if end.x >= start.x else -1.0
+        length = abs(end.x - start.x)
+
+        core.direction = direction
+        core.xs = start.x
+        core.xe = end.x
+        core.vs = start.v * direction
+        core.as_ = start.a * direction
+        core.ve = end.v * direction
+        core.ae = end.a * direction
+        core.jm = jm
+
+        side_start = self._prepare_side(core.vs, core.as_, vm, jm)
+        side_end = self._prepare_side(core.ve, -core.ae, vm, jm)
+        if not side_start.valid or not side_end.valid:
+            return None
+
+        vp_min = max(side_start.vp_min, side_end.vp_min, 0.0)
+        if vm < vp_min:
+            return None
+
+        core.t1_pre = side_start.t_pre
+        core.x1_pre = core.xs + direction * side_start.x_pre
+        core.ts1 = side_start.t_shift
+        core.t3_pre = side_end.t_pre
+        core.x3_pre = side_end.x_pre
+        core.ts3 = side_end.t_shift
+
+        len0 = length - side_start.x_pre - side_end.x_pre
+        if len0 < -S_CURVE_MAX_BS_ERROR:
+            return None
+
+        fast_eval_cfg = FastEvalConfig(
+            am=am,
+            jm=jm,
+            am_square=am * am,
+            jerk_ramp_time=am / jm,
+            inv_double_am=0.5 / am,
         )
+        start_eval = FastEvalSide(side_start.v_base, side_start.x_pre, side_start.t_shift)
+        end_eval = FastEvalSide(side_end.v_base, side_end.x_pre, side_end.t_shift)
+
+        vm_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vm)
+        x_const = -vm_eval.delta
+        if x_const > 0.0:
+            core.process1.init(side_start.v_base, vm, am, jm)
+            core.process3.init(side_end.v_base, vm, am, jm)
+            core.xs1 = core.process1.get_distance(core.ts1)
+            core.xs3 = core.process3.get_distance(core.ts3)
+            core.has_const = True
+            core.t1 = core.t1_pre + core.process1.total_time - core.ts1
+            core.t2 = core.t1 + x_const / vm
+            core.total_time = core.t2 + core.t3_pre + core.process3.total_time - core.ts3
+            core.x1 = core.xs + core.direction * vm_eval.dx1
+            core.vp = vm
+            core.valid = True
+            return core
+
+        l = vp_min
+        r = vm
+        delta_d = len0
+        while r - l > S_CURVE_MAX_BS_ERROR:
+            mid = 0.5 * (l + r)
+            mid_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, mid)
+            delta_d = mid_eval.delta
+            if abs(delta_d) <= S_CURVE_MAX_BS_ERROR:
+                l = mid
+                r = mid
+                break
+            if delta_d > 0.0:
+                r = mid
+            else:
+                l = mid
+
+        vp = 0.5 * (l + r)
+        core.process1.init(side_start.v_base, vp, am, jm)
+        core.process3.init(side_end.v_base, vp, am, jm)
+        core.xs1 = core.process1.get_distance(core.ts1)
+        core.xs3 = core.process3.get_distance(core.ts3)
+        dx1 = side_start.x_pre + core.process1.total_distance - core.xs1
+        dx3 = side_end.x_pre + core.process3.total_distance - core.xs3
+        delta_d = dx1 + dx3 - length
+        if delta_d > S_CURVE_MAX_BS_ERROR:
+            return None
+
+        core.has_const = False
+        core.t1 = core.t1_pre + core.process1.total_time - core.ts1
+        core.t2 = core.t1
+        core.total_time = core.t2 + core.t3_pre + core.process3.total_time - core.ts3
+        core.x1 = core.xs + core.direction * dx1
+        core.vp = vp
+        core.valid = True
+        return core
+
+    @staticmethod
+    def _reverse_distance(core: MotionCore, tau: float) -> float:
+        if tau <= 0.0:
+            return 0.0
+        if tau < core.t3_pre:
+            return core.ve * tau - 0.5 * core.ae * tau * tau + (1.0 / 6.0) * core.jm * tau * tau * tau
+        return core.x3_pre + core.process3.get_distance(tau - core.t3_pre + core.ts3) - core.xs3
+
+    @staticmethod
+    def _reverse_velocity(core: MotionCore, tau: float) -> float:
+        if tau <= 0.0:
+            return core.ve
+        if tau < core.t3_pre:
+            return core.ve - core.ae * tau + 0.5 * core.jm * tau * tau
+        return core.process3.get_velocity(tau - core.t3_pre + core.ts3)
+
+    @staticmethod
+    def _reverse_acceleration(core: MotionCore, tau: float) -> float:
+        if tau <= 0.0:
+            return -core.ae
+        if tau < core.t3_pre:
+            return -core.ae + core.jm * tau
+        return core.process3.get_acceleration(tau - core.t3_pre + core.ts3)
+
+    def _sample_core_x(self, core: MotionCore, t: float) -> float:
+        if t <= 0.0:
+            return core.xs
+        if t < core.t1_pre:
+            return (core.xs + core.direction *
+                    (core.vs * t + 0.5 * core.as_ * t * t + (1.0 / 6.0) * core.jm * t * t * t))
+        if t < core.t1:
+            return (core.x1_pre + core.direction *
+                    (core.process1.get_distance(t - core.t1_pre + core.ts1) - core.xs1))
+        if core.has_const and t < core.t2:
+            return core.x1 + core.direction * core.vp * (t - core.t1)
+        if t < core.total_time:
+            return core.xe - core.direction * self._reverse_distance(core, core.total_time - t)
+        return core.xe
+
+    def _sample_core_v(self, core: MotionCore, t: float) -> float:
+        if t <= 0.0:
+            return core.direction * core.vs
+        if t < core.t1_pre:
+            return core.direction * (core.vs + core.as_ * t + 0.5 * core.jm * t * t)
+        if t < core.t1:
+            return core.direction * core.process1.get_velocity(t - core.t1_pre + core.ts1)
+        if core.has_const and t < core.t2:
+            return core.direction * core.vp
+        if t < core.total_time:
+            return core.direction * self._reverse_velocity(core, core.total_time - t)
+        return core.direction * core.ve
+
+    def _sample_core_a(self, core: MotionCore, t: float) -> float:
+        if t <= 0.0:
+            return core.direction * core.as_
+        if t < core.t1_pre:
+            return core.direction * (core.as_ + core.jm * t)
+        if t < core.t1:
+            return core.direction * core.process1.get_acceleration(t - core.t1_pre + core.ts1)
+        if core.has_const and t < core.t2:
+            return 0.0
+        if t < core.total_time:
+            return -core.direction * self._reverse_acceleration(core, core.total_time - t)
+        return core.direction * core.ae
+
+    def _sample_suffix_x(self, elapsed: float) -> float:
+        tau = self.suffix.reverse_plan.total_time - elapsed
+        return self.suffix.start_x + self.suffix.reverse_plan.end_x - self._sample_prefix_x(
+            self.suffix.reverse_plan, tau)
+
+    def _sample_suffix_v(self, elapsed: float) -> float:
+        tau = self.suffix.reverse_plan.total_time - elapsed
+        return self._sample_prefix_v(self.suffix.reverse_plan, tau)
+
+    def _sample_suffix_a(self, elapsed: float) -> float:
+        tau = self.suffix.reverse_plan.total_time - elapsed
+        return -self._sample_prefix_a(self.suffix.reverse_plan, tau)
 
     def init(
             self,
@@ -294,247 +633,108 @@ class SCurve:
             am: float,
             jm: float,
             ve: float = 0.0,
-            ae: float = 0.0,
-    ) -> int:
+            ae: float = 0.0) -> int:
         self._reset_state()
-        self.process1 = SCurveAccel()
-        self.process3 = SCurveAccel()
+
+        if not _is_finite(xs, xe, vs, as_, vm, am, jm, ve, ae):
+            return self.S_CURVE_FAILED
 
         vm = abs(vm)
         am = abs(am)
         jm = abs(jm)
+        if vm <= 0.0 or am <= 0.0 or jm <= 0.0:
+            return self.S_CURVE_FAILED
+        if abs(ve) > vm or abs(ae) > am:
+            return self.S_CURVE_FAILED
 
-        direction = 1.0 if xe > xs else -1.0
-        length = abs(xe - xs)
+        start = BoundaryState(xs, vs, as_)
+        end = BoundaryState(xe, ve, ae)
 
-        vs *= direction
-        as_ *= direction
-        ve *= direction
-        ae *= direction
-
-        self.direction = direction
-        self.xs = xs
-        self.xe = xe
-        self.vs = vs
-        self.as_ = as_
-        self.ve = ve
-        self.ae = ae
-        self.jm = jm
-        self.vrs = ve
-        self.ars = -ae
-
-        if length < 1e-3 and abs(vs - ve) < 1e-3 and abs(as_ - ae) < 1e-3:
-            self.x1_pre = xs
-            self.x1 = xs
-            self.x2 = xs
+        if abs(vs) <= EPS and abs(as_) <= EPS and abs(xe - xs) <= EPS and abs(ve) <= EPS and abs(ae) <= EPS:
+            self.main_core = MotionCore(valid=True, xs=xs, xe=xe, ve=ve, ae=ae)
             self.success = True
             return self.S_CURVE_SUCCESS
 
-        if abs(vs) > vm or abs(as_) > am or abs(ve) > vm or abs(ae) > am:
-            return self.S_CURVE_FAILED
+        reverse_end = self._build_stop_prefix(BoundaryState(0.0, ve, -ae), am, jm)
+        core_end = BoundaryState(x=xe, v=ve, a=ae)
+        if reverse_end.valid and (abs(ve) > EPS or abs(ae) > EPS):
+            core_end = BoundaryState(
+                x=xe - reverse_end.end_x,
+                v=reverse_end.end_v,
+                a=-reverse_end.end_a,
+            )
+            self.suffix = SuffixPlan(reverse_plan=reverse_end, start_x=core_end.x, valid=True)
+            self.debug["used_suffix"] = True
 
-        def prepare_side(v0: float, a0: float) -> SidePrepare:
-            result = SidePrepare()
-
-            if a0 < 0.0:
-                result.v_base = v0 - 0.5 * a0 * a0 / jm
-                if abs(result.v_base) > vm:
-                    result.valid = False
-                    return result
-
-                result.vp_min = result.v_base
-                result.t_pre = -a0 / jm
-                result.x_pre = v0 * result.t_pre + (1.0 / 3.0) * a0 * result.t_pre * result.t_pre
-                result.t_shift = 0.0
-            else:
-                result.vp_min = v0 + 0.5 * a0 * a0 / jm
-                if vm < result.vp_min:
-                    result.valid = False
-                    return result
-
-                result.t_pre = 0.0
-                result.x_pre = 0.0
-                result.t_shift = a0 / jm
-                result.v_base = v0 - 0.5 * a0 * result.t_shift
-
-            if result.vp_min < 0.0:
-                result.vp_min = 0.0
-            return result
-
-        start = prepare_side(vs, as_)
-        if not start.valid:
-            return self.S_CURVE_FAILED
-
-        endr = prepare_side(ve, -ae)
-        if not endr.valid:
-            return self.S_CURVE_FAILED
-
-        self.t1_pre = start.t_pre
-        self.x1_pre = xs + direction * start.x_pre
-        self.ts1 = start.t_shift
-        self.t3_pre = endr.t_pre
-        self.x3_pre = endr.x_pre
-        self.ts3 = endr.t_shift
-
-        vp_min = max(start.vp_min, endr.vp_min)
-        if vp_min < 0.0:
-            vp_min = 0.0
-        if vm < vp_min:
-            return self.S_CURVE_FAILED
-
-        len0 = length - start.x_pre - endr.x_pre
-        if len0 < -S_CURVE_MAX_BS_ERROR:
-            return self.S_CURVE_FAILED
-
-        fast_eval_cfg = FastEvalConfig(
-            am=am,
-            jm=jm,
-            am_square=am * am,
-            jerk_ramp_time=am / jm,
-            inv_double_am=0.5 / am,
-        )
-        start_eval = FastEvalSide(start.v_base, start.x_pre, start.t_shift)
-        end_eval = FastEvalSide(endr.v_base, endr.x_pre, endr.t_shift)
-
-        vm_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vm)
-        x_const = -vm_eval.delta
-
-        if x_const > 0.0:
-            self.process1.init(start.v_base, vm, am, jm)
-            self.process3.init(endr.v_base, vm, am, jm)
-            self.xs1 = self.process1.get_distance(self.ts1)
-            self.xs3 = self.process3.get_distance(self.ts3)
-
-            self.has_const = True
-            self.t1 = self.t1_pre + self.process1.total_time - self.ts1
-
-            t_const = x_const / vm
-            self.t2 = self.t1 + t_const
-            self.total_time = self.t2 + self.t3_pre + self.process3.total_time - self.ts3
-
-            self.x1 = self.xs + self.direction * vm_eval.dx1
-            self.x2 = self.x1 + self.direction * x_const
-            self.vp = vm
+        direct_core = self._solve_core(start, core_end, vm, am, jm)
+        if direct_core is not None:
+            self.main_core = direct_core
             self.success = True
+            self.total_time = self.main_core.total_time + (
+                self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0
+            )
             return self.S_CURVE_SUCCESS
 
-        left = vp_min
-        right = vm
-        delta_d = len0
-        dx1 = 0.0
-        dx3 = 0.0
-
-        while right - left > S_CURVE_MAX_BS_ERROR:
-            mid = 0.5 * (left + right)
-            mid_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, mid)
-            delta_d = mid_eval.delta
-
-            if abs(delta_d) <= S_CURVE_MAX_BS_ERROR:
-                left = mid
-                right = mid
-                break
-
-            if delta_d > 0.0:
-                right = mid
-            else:
-                left = mid
-
-        vp = 0.5 * (left + right)
-        self.process1.init(start.v_base, vp, am, jm)
-        self.process3.init(endr.v_base, vp, am, jm)
-        self.xs1 = self.process1.get_distance(self.ts1)
-        self.xs3 = self.process3.get_distance(self.ts3)
-        dx1 = start.x_pre + self.process1.total_distance - self.xs1
-        dx3 = endr.x_pre + self.process3.total_distance - self.xs3
-        delta_d = dx1 + dx3 - length
-
-        if delta_d > S_CURVE_MAX_BS_ERROR:
+        stop_prefix = self._build_stop_prefix(start, am, jm)
+        if not stop_prefix.valid:
             return self.S_CURVE_FAILED
 
-        self.has_const = False
-        self.t1 = self.t1_pre + self.process1.total_time - self.ts1
-        self.t2 = self.t1
-        self.total_time = self.t2 + self.t3_pre + self.process3.total_time - self.ts3
+        recovered = BoundaryState(stop_prefix.end_x, stop_prefix.end_v, stop_prefix.end_a)
+        core = self._solve_core(recovered, core_end, vm, am, jm)
+        if core is None:
+            return self.S_CURVE_FAILED
 
-        self.x1 = self.xs + self.direction * dx1
-        self.x2 = self.x1
-        self.vp = vp
+        self.prefix = stop_prefix
+        self.main_core = core
+        self.debug["used_prefix"] = True
+        self.debug["fallback_stop_prefix"] = True
         self.success = True
+        self.total_time = self.prefix.total_time + self.main_core.total_time + (
+            self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0
+        )
         return self.S_CURVE_SUCCESS
-
-    def _get_reverse_distance(self, tau: float) -> float:
-        if tau <= 0.0:
-            return 0.0
-        if tau < self.t3_pre:
-            tau2 = tau * tau
-            tau3 = tau2 * tau
-            return self.ve * tau - 0.5 * self.ae * tau2 + (1.0 / 6.0) * self.jm * tau3
-
-        return self.x3_pre + self.process3.get_distance(tau - self.t3_pre + self.ts3) - self.xs3
-
-    def _get_reverse_velocity(self, tau: float) -> float:
-        if tau <= 0.0:
-            return self.ve
-        if tau < self.t3_pre:
-            return self.ve - self.ae * tau + 0.5 * self.jm * tau * tau
-
-        return self.process3.get_velocity(tau - self.t3_pre + self.ts3)
-
-    def _get_reverse_acceleration(self, tau: float) -> float:
-        if tau <= 0.0:
-            return -self.ae
-        if tau < self.t3_pre:
-            return -self.ae + self.jm * tau
-
-        return self.process3.get_acceleration(tau - self.t3_pre + self.ts3)
 
     def calc_x(self, t: float) -> float:
         if not self.success:
             return 0.0
         if t <= 0.0:
-            return self.xs
-        if t < self.t1_pre:
-            t2 = t * t
-            t3 = t2 * t
-            return self.xs + self.direction * (
-                    self.vs * t + 0.5 * self.as_ * t2 + (1.0 / 6.0) * self.jm * t3
-            )
-        if t < self.t1:
-            return self.x1_pre + self.direction * (
-                    self.process1.get_distance(t - self.t1_pre + self.ts1) - self.xs1
-            )
-        if self.has_const and t < self.t2:
-            return self.x1 + self.direction * self.vp * (t - self.t1)
-        if t < self.total_time:
-            return self.xe - self.direction * self._get_reverse_distance(self.total_time - t)
-        return self.xe
+            return self.prefix.x0 if self.prefix.valid else self.main_core.xs
+        if self.prefix.valid and t < self.prefix.total_time:
+            return self._sample_prefix_x(self.prefix, t)
+        core_start = self.prefix.total_time if self.prefix.valid else 0.0
+        core_end = core_start + self.main_core.total_time
+        if t < core_end:
+            return self._sample_core_x(self.main_core, t - core_start)
+        if self.suffix.valid:
+            return self._sample_suffix_x(t - core_end)
+        return self.main_core.xe
 
     def calc_v(self, t: float) -> float:
         if not self.success:
             return 0.0
         if t <= 0.0:
-            return self.direction * self.vs
-        if t < self.t1_pre:
-            return self.direction * (self.vs + self.as_ * t + 0.5 * self.jm * t * t)
-        if t < self.t1:
-            return self.direction * self.process1.get_velocity(t - self.t1_pre + self.ts1)
-        if self.has_const and t < self.t2:
-            return self.direction * self.vp
-        if t < self.total_time:
-            return self.direction * self._get_reverse_velocity(self.total_time - t)
-        return self.direction * self.ve
+            return self.prefix.v0 if self.prefix.valid else self.main_core.direction * self.main_core.vs
+        if self.prefix.valid and t < self.prefix.total_time:
+            return self._sample_prefix_v(self.prefix, t)
+        core_start = self.prefix.total_time if self.prefix.valid else 0.0
+        core_end = core_start + self.main_core.total_time
+        if t < core_end:
+            return self._sample_core_v(self.main_core, t - core_start)
+        if self.suffix.valid:
+            return self._sample_suffix_v(t - core_end)
+        return self.main_core.direction * self.main_core.ve
 
     def calc_a(self, t: float) -> float:
         if not self.success:
             return 0.0
         if t <= 0.0:
-            return self.direction * self.as_
-        if t < self.t1_pre:
-            return self.direction * (self.as_ + self.jm * t)
-        if t < self.t1:
-            return self.direction * self.process1.get_acceleration(t - self.t1_pre + self.ts1)
-        if self.has_const and t < self.t2:
-            return 0.0
-        if t < self.total_time:
-            return -self.direction * self._get_reverse_acceleration(self.total_time - t)
-        return self.direction * self.ae
+            return self.prefix.a0 if self.prefix.valid else self.main_core.direction * self.main_core.as_
+        if self.prefix.valid and t < self.prefix.total_time:
+            return self._sample_prefix_a(self.prefix, t)
+        core_start = self.prefix.total_time if self.prefix.valid else 0.0
+        core_end = core_start + self.main_core.total_time
+        if t < core_end:
+            return self._sample_core_a(self.main_core, t - core_start)
+        if self.suffix.valid:
+            return self._sample_suffix_a(t - core_end)
+        return self.main_core.direction * self.main_core.ae

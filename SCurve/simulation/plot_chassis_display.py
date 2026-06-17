@@ -77,6 +77,11 @@ def chassis_plot(start: Posture,
         print("syaw init failed")
         return
 
+    print("===== Chassis axis debug =====")
+    print(f"x-axis: {sx.debug}")
+    print(f"y-axis: {sy.debug}")
+    print(f"yaw-axis: {syaw.debug}")
+
     def p_in_w(t) -> Posture:
         return start + Posture(
             x=sx.calc_x(t),
@@ -257,13 +262,13 @@ def chassis_plot(start: Posture,
 
 if __name__ == "__main__":
     chassis_plot(
-        start=Posture(x=0, y=0, yaw=0),
-        end=Posture(x=3, y=1, yaw=0),
-        start_velocity=Velocity(vx=0, vy=0, wz=0),
-        start_accel=Acceleration(ax=0, ay=0, ayaw=0),
-        end_velocity=Velocity(vx=0.5, vy=0.2, wz=0.0),
-        end_accel=Acceleration(ax=0.1, ay=0.05, ayaw=0.0),
-        x_limit=Limit(v_max=5, a_max=1.5, j_max=2),
-        y_limit=Limit(v_max=5, a_max=1.5, j_max=2),
+        start=Posture(x=0.0, y=0, yaw=0),
+        end=Posture(x=1.0, y=0, yaw=0),
+        start_velocity=Velocity(vx=0.5, vy=0.0, wz=0),
+        start_accel=Acceleration(ax=2.5, ay=0, ayaw=0),
+        end_velocity=Velocity(vx=0.0, vy=0, wz=0.0),
+        end_accel=Acceleration(ax=0.0, ay=0.0, ayaw=0.0),
+        x_limit=Limit(v_max=1.5, a_max=1.0, j_max=2.0),
+        y_limit=Limit(v_max=1, a_max=1, j_max=2),
         yaw_limit=Limit(v_max=180, a_max=60, j_max=360)
     )
