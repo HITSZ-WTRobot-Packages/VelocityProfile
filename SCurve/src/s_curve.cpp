@@ -355,6 +355,20 @@ SCurveProfile::PrefixPlan SCurveProfile::BuildStopPrefix(
     return plan;
 }
 
+bool SCurveProfile::PrecheckCore(
+        const BoundaryState& start, const BoundaryState& end, const float vm, const float jm)
+{
+    const float direction = end.x >= start.x ? 1.0f : -1.0f;
+
+    const SidePrepare side_start = PrepareSide(start.v * direction, start.a * direction, vm, jm);
+    const SidePrepare side_end   = PrepareSide(end.v * direction, -end.a * direction, vm, jm);
+    if (!side_start.valid || !side_end.valid)
+        return false;
+
+    const float vp_min = fmaxf(fmaxf(side_start.vp_min, side_end.vp_min), 0.0f);
+    return vp_min <= vm;
+}
+
 SCurveProfile::PrefixPlan SCurveProfile::TrimPrefix(const PrefixPlan& plan, const float cut_time)
 {
     PrefixPlan trimmed{};
@@ -582,6 +596,10 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     const FastEvalSide start_eval{ side_start.v_base, side_start.x_pre, side_start.t_shift };
     const FastEvalSide end_eval{ side_end.v_base, side_end.x_pre, side_end.t_shift };
 
+    const FastEvalResult min_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vp_min);
+    if (min_eval.delta > S_CURVE_MAX_BS_ERROR)
+        return SolveStatus::kNeedsPrefixFallback;
+
     const FastEvalResult vm_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vm);
     const float          x_const = -vm_eval.delta;
     if (x_const > 0)
@@ -654,6 +672,10 @@ bool SCurveProfile::TryPrefixHandoff(
     if (prefix == nullptr || core == nullptr || !prefix_seed.valid)
         return false;
 
+    const float vm = fabsf(cfg.max_spd);
+    const float am = fabsf(cfg.max_acc);
+    const float jm = fabsf(cfg.max_jerk);
+
     float prev_t = 0.0f;
     for (int step = 1; step <= kRecoverySearchSteps; ++step)
     {
@@ -663,6 +685,11 @@ bool SCurveProfile::TryPrefixHandoff(
             SamplePrefixV(prefix_seed, t),
             SamplePrefixA(prefix_seed, t),
         };
+        if (!PrecheckCore(state, end, vm, jm))
+        {
+            prev_t = t;
+            continue;
+        }
 
         MotionCore candidate{};
         if (SolveCore(cfg, state, end, &candidate) != SolveStatus::kSuccess)
@@ -682,6 +709,11 @@ bool SCurveProfile::TryPrefixHandoff(
                 SamplePrefixV(prefix_seed, mid),
                 SamplePrefixA(prefix_seed, mid),
             };
+            if (!PrecheckCore(mid_state, end, vm, jm))
+            {
+                lo = mid;
+                continue;
+            }
             MotionCore mid_core{};
             if (SolveCore(cfg, mid_state, end, &mid_core) != SolveStatus::kSuccess)
             {

@@ -446,6 +446,21 @@ class SCurve:
             return plan.a_hold + plan.j_settle * dt
         return plan.end_a
 
+    @staticmethod
+    def _precheck_core(
+            start: BoundaryState,
+            end: BoundaryState,
+            vm: float,
+            jm: float) -> bool:
+        direction = 1.0 if end.x >= start.x else -1.0
+        side_start = SCurve._prepare_side(start.v * direction, start.a * direction, vm, jm)
+        side_end = SCurve._prepare_side(end.v * direction, -end.a * direction, vm, jm)
+        if not side_start.valid or not side_end.valid:
+            return False
+
+        vp_min = max(side_start.vp_min, side_end.vp_min, 0.0)
+        return vp_min <= vm
+
     @classmethod
     def _trim_prefix(cls, plan: PrefixPlan, cut_time: float) -> PrefixPlan:
         trimmed = PrefixPlan()
@@ -536,6 +551,9 @@ class SCurve:
                 v=self._sample_prefix_v(prefix_seed, t),
                 a=self._sample_prefix_a(prefix_seed, t),
             )
+            if not self._precheck_core(state, core_end, vm, jm):
+                prev_t = t
+                continue
             core = self._solve_core(state, core_end, vm, am, jm)
             if core is None:
                 prev_t = t
@@ -551,6 +569,9 @@ class SCurve:
                     v=self._sample_prefix_v(prefix_seed, mid),
                     a=self._sample_prefix_a(prefix_seed, mid),
                 )
+                if not self._precheck_core(mid_state, core_end, vm, jm):
+                    lo = mid
+                    continue
                 mid_core = self._solve_core(mid_state, core_end, vm, am, jm)
                 if mid_core is None:
                     lo = mid
@@ -611,6 +632,10 @@ class SCurve:
         )
         start_eval = FastEvalSide(side_start.v_base, side_start.x_pre, side_start.t_shift)
         end_eval = FastEvalSide(side_end.v_base, side_end.x_pre, side_end.t_shift)
+
+        min_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vp_min)
+        if min_eval.delta > S_CURVE_MAX_BS_ERROR:
+            return None
 
         vm_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vm)
         x_const = -vm_eval.delta

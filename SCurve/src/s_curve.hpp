@@ -174,6 +174,8 @@ private:
     [[nodiscard]] static BoundaryState EvaluateConstantJerk(
             const BoundaryState& state, float jerk, float dt);
     [[nodiscard]] static PrefixPlan BuildStopPrefix(const BoundaryState& start, float am, float jm);
+    [[nodiscard]] static bool       PrecheckCore(
+            const BoundaryState& start, const BoundaryState& end, float vm, float jm);
     [[nodiscard]] static PrefixPlan TrimPrefix(const PrefixPlan& plan, float cut_time);
     [[nodiscard]] static float        SamplePrefixX(const PrefixPlan& plan, float t);
     [[nodiscard]] static float        SamplePrefixV(const PrefixPlan& plan, float t);
