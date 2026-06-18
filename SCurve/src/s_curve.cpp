@@ -6,7 +6,6 @@
 #include "s_curve.hpp"
 
 #include <cmath>
-#include <limits>
 
 namespace velocity_profile
 {
@@ -18,6 +17,7 @@ constexpr float kZero     = 0.0f;
 constexpr float kEpsilon  = 1.0e-6f;
 constexpr int   kRecoverySearchSteps   = 96;
 constexpr int   kRecoveryRefineSteps   = 24;
+constexpr int   kPeakVelocityBisectIterations = 64;
 
 struct FastEvalConfig
 {
@@ -757,49 +757,61 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
         return SolveStatus::kSuccess;
     }
 
-    float l = vp_min;
-    float r = vm;
-    float delta_d = len0;
-    float dx1 = 0;
-    float dx3 = 0;
-
-    while (r - l > S_CURVE_MAX_BS_ERROR)
+    float          l      = vp_min;
+    float          r      = vm;
+    FastEvalResult l_eval = min_eval;
+    FastEvalResult r_eval = vm_eval;
+    for (int iter = 0; iter < kPeakVelocityBisectIterations; ++iter)
     {
-        const float          mid = kHalf * (l + r);
-        const FastEvalResult mid_eval =
-                EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
-        delta_d = mid_eval.delta;
-        if (fabsf(delta_d) <= S_CURVE_MAX_BS_ERROR)
+        const float mid = kHalf * (l + r);
+        if (!(mid > l && mid < r))
+            break;
+
+        const FastEvalResult mid_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
+        if (fabsf(mid_eval.delta) <= S_CURVE_MAX_BS_ERROR)
         {
-            l = mid;
-            r = mid;
+            l      = mid;
+            l_eval = mid_eval;
+            r      = mid;
+            r_eval = mid_eval;
             break;
         }
-        if (delta_d > 0)
-            r = mid;
+
+        if (mid_eval.delta > 0)
+        {
+            r      = mid;
+            r_eval = mid_eval;
+        }
         else
-            l = mid;
+        {
+            l      = mid;
+            l_eval = mid_eval;
+        }
     }
 
-    const float vp = kHalf * (l + r);
-    out.process1.init(side_start.v_base, vp, am, jm);
-    out.process3.init(side_end.v_base, vp, am, jm);
-    out.xs1    = out.process1.getDistance(out.ts1);
-    out.xs3    = out.process3.getDistance(out.ts3);
-    dx1        = side_start.x_pre + out.process1.getTotalDistance() - out.xs1;
-    dx3        = side_end.x_pre + out.process3.getTotalDistance() - out.xs3;
-    delta_d    = dx1 + dx3 - len;
-    if (delta_d > S_CURVE_MAX_BS_ERROR)
+    if (l_eval.delta > kEpsilon)
         return SolveStatus::kNeedsPrefixFallback;
 
-    out.has_const  = false;
-    out.t1         = out.t1_pre + out.process1.getTotalTime() - out.ts1;
-    out.t2         = out.t1;
-    out.total_time = out.t2 + out.t3_pre + out.process3.getTotalTime() - out.ts3;
-    out.x1         = out.xs + out.direction * dx1;
-    out.vp         = vp;
-    out.valid      = true;
-    *core          = out;
+    const float vp = l;
+    out.process1.init(side_start.v_base, vp, am, jm);
+    out.process3.init(side_end.v_base, vp, am, jm);
+    out.xs1 = out.process1.getDistance(out.ts1);
+    out.xs3 = out.process3.getDistance(out.ts3);
+    const float dx1     = side_start.x_pre + out.process1.getTotalDistance() - out.xs1;
+    const float dx3     = side_end.x_pre + out.process3.getTotalDistance() - out.xs3;
+    const float delta_d = dx1 + dx3 - len;
+    if (delta_d > kEpsilon)
+        return SolveStatus::kNeedsPrefixFallback;
+
+    const float residual_const = delta_d < -kEpsilon ? -delta_d : 0.0f;
+    out.has_const             = residual_const > 0.0f;
+    out.t1                    = out.t1_pre + out.process1.getTotalTime() - out.ts1;
+    out.t2                    = out.t1 + (out.has_const ? residual_const / vp : 0.0f);
+    out.total_time      = out.t2 + out.t3_pre + out.process3.getTotalTime() - out.ts3;
+    out.x1              = out.xs + out.direction * dx1;
+    out.vp              = vp;
+    out.valid           = true;
+    *core               = out;
     return SolveStatus::kSuccess;
 }
 
@@ -844,7 +856,6 @@ bool SCurveProfile::TryPrefixHandoff(
         return false;
 
     const float vm = fabsf(cfg.max_spd);
-    const float am = fabsf(cfg.max_acc);
     const float jm = fabsf(cfg.max_jerk);
 
     float prev_t = 0.0f;

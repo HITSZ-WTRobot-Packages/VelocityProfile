@@ -78,7 +78,6 @@ private:
     enum class SolveStatus : uint8_t
     {
         kSuccess,
-        kInvalidInput,
         kNeedsPrefixFallback,
         kInternalError,
     };
