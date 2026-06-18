@@ -355,6 +355,144 @@ SCurveProfile::PrefixPlan SCurveProfile::BuildStopPrefix(
     return plan;
 }
 
+SCurveProfile::PrefixPlan SCurveProfile::ShiftPrefixWithVelocityBias(
+        const PrefixPlan& plan, const float x_origin, const float velocity_bias)
+{
+    PrefixPlan shifted{};
+    shifted.valid = false;
+    if (!plan.valid)
+        return shifted;
+
+    const float t_hold_end = plan.t_ramp + plan.t_hold;
+    shifted.x0        = x_origin;
+    shifted.v0        = velocity_bias + plan.v0;
+    shifted.a0        = plan.a0;
+    shifted.j_ramp    = plan.j_ramp;
+    shifted.j_settle  = plan.j_settle;
+    shifted.t_ramp    = plan.t_ramp;
+    shifted.t_hold    = plan.t_hold;
+    shifted.t_settle  = plan.t_settle;
+    shifted.x_ramp    = x_origin + (plan.x_ramp - plan.x0) + velocity_bias * plan.t_ramp;
+    shifted.v_ramp    = velocity_bias + plan.v_ramp;
+    shifted.a_ramp    = plan.a_ramp;
+    shifted.x_hold    = x_origin + (plan.x_hold - plan.x0) + velocity_bias * t_hold_end;
+    shifted.v_hold    = velocity_bias + plan.v_hold;
+    shifted.a_hold    = plan.a_hold;
+    shifted.total_time = plan.total_time;
+    shifted.end_x     = x_origin + (plan.end_x - plan.x0) + velocity_bias * plan.total_time;
+    shifted.end_v     = velocity_bias + plan.end_v;
+    shifted.end_a     = plan.end_a;
+    shifted.valid     = IsFinite(shifted.total_time) && IsFinite(shifted.end_x) && IsFinite(shifted.end_v) &&
+                    IsFinite(shifted.end_a);
+    return shifted;
+}
+
+SCurveProfile::PrefixPlan SCurveProfile::MergePrefixWithLeadingJerk(
+        const BoundaryState& start, const float jerk, const float lead_time, const PrefixPlan& tail)
+{
+    PrefixPlan merged{};
+    merged.valid = false;
+    if (!tail.valid)
+        return merged;
+
+    merged.x0        = start.x;
+    merged.v0        = start.v;
+    merged.a0        = start.a;
+    merged.j_ramp    = jerk;
+    merged.j_settle  = tail.j_settle;
+    merged.t_ramp    = lead_time + tail.t_ramp;
+    merged.t_hold    = tail.t_hold;
+    merged.t_settle  = tail.t_settle;
+
+    const BoundaryState after_ramp = EvaluateConstantJerk(start, jerk, merged.t_ramp);
+    const BoundaryState after_hold = EvaluateConstantJerk(after_ramp, 0.0f, merged.t_hold);
+    const BoundaryState end        = EvaluateConstantJerk(after_hold, merged.j_settle, merged.t_settle);
+
+    merged.x_ramp    = after_ramp.x;
+    merged.v_ramp    = after_ramp.v;
+    merged.a_ramp    = after_ramp.a;
+    merged.x_hold    = after_hold.x;
+    merged.v_hold    = after_hold.v;
+    merged.a_hold    = after_hold.a;
+    merged.total_time = merged.t_ramp + merged.t_hold + merged.t_settle;
+    merged.end_x     = end.x;
+    merged.end_v     = end.v;
+    merged.end_a     = end.a;
+    merged.valid     = IsFinite(merged.total_time) && IsFinite(merged.end_x) && IsFinite(merged.end_v) &&
+                   IsFinite(merged.end_a);
+    return merged;
+}
+
+SCurveProfile::PrefixPlan SCurveProfile::BuildVelocityClampPrefix(
+        const BoundaryState& start, const float target_v, const float am, const float jm)
+{
+    const float motion_sign = Sign(target_v);
+    if (motion_sign > 0.0f && start.v <= target_v + kEpsilon && start.a > kEpsilon)
+    {
+        const float         t_zero     = start.a / jm;
+        const BoundaryState peak_state = EvaluateConstantJerk(start, -jm, t_zero);
+        const PrefixPlan    tail       = BuildVelocityClampPrefix(peak_state, target_v, am, jm);
+        if (!tail.valid || tail.j_ramp >= 0.0f)
+            return {};
+        return MergePrefixWithLeadingJerk(start, -jm, t_zero, tail);
+    }
+
+    if (motion_sign < 0.0f && start.v >= target_v - kEpsilon && start.a < -kEpsilon)
+    {
+        const float         t_zero     = -start.a / jm;
+        const BoundaryState peak_state = EvaluateConstantJerk(start, jm, t_zero);
+        const PrefixPlan    tail       = BuildVelocityClampPrefix(peak_state, target_v, am, jm);
+        if (!tail.valid || tail.j_ramp <= 0.0f)
+            return {};
+        return MergePrefixWithLeadingJerk(start, jm, t_zero, tail);
+    }
+
+    const PrefixPlan offset_plan = BuildStopPrefix({ 0.0f, start.v - target_v, start.a }, am, jm);
+    if (!offset_plan.valid)
+        return {};
+    return ShiftPrefixWithVelocityBias(offset_plan, start.x, target_v);
+}
+
+bool SCurveProfile::GetVelocityClampTarget(
+        const BoundaryState& start, const float vm, const float jm, float* target_v)
+{
+    if (target_v == nullptr)
+        return false;
+
+    float motion_sign = Sign(start.v);
+    if (motion_sign == 0.0f)
+        motion_sign = Sign(start.a);
+    if (motion_sign == 0.0f)
+        return false;
+
+    if (motion_sign > 0.0f)
+    {
+        if (start.v > vm + kEpsilon)
+        {
+            *target_v = vm;
+            return true;
+        }
+        if (start.a > kEpsilon && start.v + kHalf * start.a * start.a / jm > vm + kEpsilon)
+        {
+            *target_v = vm;
+            return true;
+        }
+        return false;
+    }
+
+    if (start.v < -vm - kEpsilon)
+    {
+        *target_v = -vm;
+        return true;
+    }
+    if (start.a < -kEpsilon && start.v - kHalf * start.a * start.a / jm < -vm - kEpsilon)
+    {
+        *target_v = -vm;
+        return true;
+    }
+    return false;
+}
+
 bool SCurveProfile::PrecheckCore(
         const BoundaryState& start, const BoundaryState& end, const float vm, const float jm)
 {
@@ -665,6 +803,39 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     return SolveStatus::kSuccess;
 }
 
+bool SCurveProfile::TryVelocityClampRecovery(
+        const Config& cfg, const BoundaryState& start, const BoundaryState& end, PrefixPlan* prefix,
+        MotionCore* core) const
+{
+    if (prefix == nullptr || core == nullptr)
+        return false;
+
+    const float vm = fabsf(cfg.max_spd);
+    const float am = fabsf(cfg.max_acc);
+    const float jm = fabsf(cfg.max_jerk);
+
+    float target_v = 0.0f;
+    if (!GetVelocityClampTarget(start, vm, jm, &target_v))
+        return false;
+
+    const PrefixPlan clamp_prefix = BuildVelocityClampPrefix(start, target_v, am, jm);
+    if (!clamp_prefix.valid)
+        return false;
+
+    const BoundaryState recovered{
+        clamp_prefix.end_x,
+        clamp_prefix.end_v,
+        clamp_prefix.end_a,
+    };
+    MotionCore recovered_core{};
+    if (SolveCore(cfg, recovered, end, &recovered_core) != SolveStatus::kSuccess)
+        return false;
+
+    *prefix = clamp_prefix;
+    *core   = recovered_core;
+    return true;
+}
+
 bool SCurveProfile::TryPrefixHandoff(
         const Config& cfg, const PrefixPlan& prefix_seed, const BoundaryState& end, PrefixPlan* prefix,
         MotionCore* core) const
@@ -883,6 +1054,14 @@ SCurveProfile::SCurveProfile(
     SolveStatus status = SolveCore(cfg, start, core_end, &main_core_);
     if (status != SolveStatus::kSuccess)
     {
+        if (TryVelocityClampRecovery(cfg, start, core_end, &prefix_, &main_core_))
+        {
+            success_    = true;
+            total_time_ = prefix_.total_time + main_core_.total_time +
+                          (suffix_.valid ? suffix_.reverse_plan.total_time : 0.0f);
+            return;
+        }
+
         const PrefixPlan stop_prefix = BuildStopPrefix(start, am, jm);
         if (!stop_prefix.valid)
             return;

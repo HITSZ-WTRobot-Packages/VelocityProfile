@@ -174,6 +174,14 @@ private:
     [[nodiscard]] static BoundaryState EvaluateConstantJerk(
             const BoundaryState& state, float jerk, float dt);
     [[nodiscard]] static PrefixPlan BuildStopPrefix(const BoundaryState& start, float am, float jm);
+    [[nodiscard]] static PrefixPlan ShiftPrefixWithVelocityBias(
+            const PrefixPlan& plan, float x_origin, float velocity_bias);
+    [[nodiscard]] static PrefixPlan MergePrefixWithLeadingJerk(
+            const BoundaryState& start, float jerk, float lead_time, const PrefixPlan& tail);
+    [[nodiscard]] static PrefixPlan BuildVelocityClampPrefix(
+            const BoundaryState& start, float target_v, float am, float jm);
+    [[nodiscard]] static bool GetVelocityClampTarget(
+            const BoundaryState& start, float vm, float jm, float* target_v);
     [[nodiscard]] static bool       PrecheckCore(
             const BoundaryState& start, const BoundaryState& end, float vm, float jm);
     [[nodiscard]] static PrefixPlan TrimPrefix(const PrefixPlan& plan, float cut_time);
@@ -185,6 +193,9 @@ private:
 
     [[nodiscard]] SolveStatus SolveCore(
             const Config& cfg, const BoundaryState& start, const BoundaryState& end, MotionCore* core) const;
+    [[nodiscard]] bool TryVelocityClampRecovery(
+            const Config& cfg, const BoundaryState& start, const BoundaryState& end, PrefixPlan* prefix,
+            MotionCore* core) const;
     [[nodiscard]] bool TryPrefixHandoff(
             const Config& cfg, const PrefixPlan& prefix_seed, const BoundaryState& end, PrefixPlan* prefix,
             MotionCore* core) const;

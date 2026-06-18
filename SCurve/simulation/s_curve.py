@@ -312,6 +312,7 @@ class SCurve:
             "used_prefix": False,
             "used_suffix": False,
             "used_recovery_prefix": False,
+            "used_clamp_prefix": False,
             "fallback_stop_prefix": False,
         }
 
@@ -447,6 +448,134 @@ class SCurve:
         return plan.end_a
 
     @staticmethod
+    def _shift_prefix_with_velocity_bias(
+            plan: PrefixPlan,
+            x_origin: float,
+            velocity_bias: float) -> PrefixPlan:
+        shifted = PrefixPlan()
+        if not plan.valid:
+            return shifted
+
+        t_hold_end = plan.t_ramp + plan.t_hold
+        shifted.x0 = x_origin
+        shifted.v0 = velocity_bias + plan.v0
+        shifted.a0 = plan.a0
+        shifted.j_ramp = plan.j_ramp
+        shifted.j_settle = plan.j_settle
+        shifted.t_ramp = plan.t_ramp
+        shifted.t_hold = plan.t_hold
+        shifted.t_settle = plan.t_settle
+        shifted.x_ramp = x_origin + (plan.x_ramp - plan.x0) + velocity_bias * plan.t_ramp
+        shifted.v_ramp = velocity_bias + plan.v_ramp
+        shifted.a_ramp = plan.a_ramp
+        shifted.x_hold = x_origin + (plan.x_hold - plan.x0) + velocity_bias * t_hold_end
+        shifted.v_hold = velocity_bias + plan.v_hold
+        shifted.a_hold = plan.a_hold
+        shifted.total_time = plan.total_time
+        shifted.end_x = x_origin + (plan.end_x - plan.x0) + velocity_bias * plan.total_time
+        shifted.end_v = velocity_bias + plan.end_v
+        shifted.end_a = plan.end_a
+        shifted.valid = _is_finite(
+            shifted.total_time,
+            shifted.end_x,
+            shifted.end_v,
+            shifted.end_a,
+        )
+        return shifted
+
+    @classmethod
+    def _build_velocity_clamp_prefix(
+            cls,
+            start: BoundaryState,
+            target_v: float,
+            am: float,
+            jm: float) -> PrefixPlan:
+        motion_sign = _sign(target_v)
+        if motion_sign > 0.0 and start.v <= target_v + EPS and start.a > EPS:
+            t_zero = start.a / jm
+            peak_state = _evaluate_constant_jerk(start, -jm, t_zero)
+            tail = cls._build_velocity_clamp_prefix(peak_state, target_v, am, jm)
+            if not tail.valid or tail.j_ramp >= 0.0:
+                return PrefixPlan()
+            return cls._merge_prefix_with_leading_jerk(start, -jm, t_zero, tail)
+
+        if motion_sign < 0.0 and start.v >= target_v - EPS and start.a < -EPS:
+            t_zero = -start.a / jm
+            peak_state = _evaluate_constant_jerk(start, jm, t_zero)
+            tail = cls._build_velocity_clamp_prefix(peak_state, target_v, am, jm)
+            if not tail.valid or tail.j_ramp <= 0.0:
+                return PrefixPlan()
+            return cls._merge_prefix_with_leading_jerk(start, jm, t_zero, tail)
+
+        offset_plan = cls._build_stop_prefix(
+            BoundaryState(0.0, start.v - target_v, start.a),
+            am,
+            jm,
+        )
+        if not offset_plan.valid:
+            return PrefixPlan()
+        return cls._shift_prefix_with_velocity_bias(offset_plan, start.x, target_v)
+
+    @staticmethod
+    def _merge_prefix_with_leading_jerk(
+            start: BoundaryState,
+            jerk: float,
+            lead_time: float,
+            tail: PrefixPlan) -> PrefixPlan:
+        merged = PrefixPlan()
+        merged.x0 = start.x
+        merged.v0 = start.v
+        merged.a0 = start.a
+        merged.j_ramp = jerk
+        merged.j_settle = tail.j_settle
+        merged.t_ramp = lead_time + tail.t_ramp
+        merged.t_hold = tail.t_hold
+        merged.t_settle = tail.t_settle
+
+        after_ramp = _evaluate_constant_jerk(start, jerk, merged.t_ramp)
+        after_hold = _evaluate_constant_jerk(after_ramp, 0.0, merged.t_hold)
+        end = _evaluate_constant_jerk(after_hold, merged.j_settle, merged.t_settle)
+
+        merged.x_ramp = after_ramp.x
+        merged.v_ramp = after_ramp.v
+        merged.a_ramp = after_ramp.a
+        merged.x_hold = after_hold.x
+        merged.v_hold = after_hold.v
+        merged.a_hold = after_hold.a
+        merged.total_time = merged.t_ramp + merged.t_hold + merged.t_settle
+        merged.end_x = end.x
+        merged.end_v = end.v
+        merged.end_a = end.a
+        merged.valid = _is_finite(
+            merged.total_time,
+            merged.end_x,
+            merged.end_v,
+            merged.end_a,
+        )
+        return merged
+
+    @staticmethod
+    def _get_velocity_clamp_target(start: BoundaryState, vm: float, jm: float) -> float | None:
+        motion_sign = _sign(start.v)
+        if motion_sign == 0.0:
+            motion_sign = _sign(start.a)
+        if motion_sign == 0.0:
+            return None
+
+        if motion_sign > 0.0:
+            if start.v > vm + EPS:
+                return vm
+            if start.a > EPS and start.v + 0.5 * start.a * start.a / jm > vm + EPS:
+                return vm
+            return None
+
+        if start.v < -vm - EPS:
+            return -vm
+        if start.a < -EPS and start.v - 0.5 * start.a * start.a / jm < -vm - EPS:
+            return -vm
+        return None
+
+    @staticmethod
     def _precheck_core(
             start: BoundaryState,
             end: BoundaryState,
@@ -532,6 +661,27 @@ class SCurve:
         trimmed.t_hold = plan.t_hold
         trimmed.t_settle = t_end - hold_end
         return trimmed
+
+    def _try_velocity_clamp_recovery(
+            self,
+            start: BoundaryState,
+            core_end: BoundaryState,
+            vm: float,
+            am: float,
+            jm: float) -> tuple[PrefixPlan | None, MotionCore | None]:
+        target_v = self._get_velocity_clamp_target(start, vm, jm)
+        if target_v is None:
+            return None, None
+
+        prefix = self._build_velocity_clamp_prefix(start, target_v, am, jm)
+        if not prefix.valid:
+            return None, None
+
+        recovered = BoundaryState(prefix.end_x, prefix.end_v, prefix.end_a)
+        core = self._solve_core(recovered, core_end, vm, am, jm)
+        if core is None:
+            return None, None
+        return prefix, core
 
     def _try_prefix_handoff(
             self,
@@ -815,6 +965,19 @@ class SCurve:
             self.main_core = direct_core
             self.success = True
             self.total_time = self.main_core.total_time + (
+                self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0
+            )
+            return self.S_CURVE_SUCCESS
+
+        prefix, core = self._try_velocity_clamp_recovery(start, core_end, vm, am, jm)
+        if prefix is not None and core is not None:
+            self.prefix = prefix
+            self.main_core = core
+            self.debug["used_prefix"] = True
+            self.debug["used_recovery_prefix"] = True
+            self.debug["used_clamp_prefix"] = True
+            self.success = True
+            self.total_time = self.prefix.total_time + self.main_core.total_time + (
                 self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0
             )
             return self.S_CURVE_SUCCESS
