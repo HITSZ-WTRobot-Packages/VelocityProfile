@@ -16,6 +16,8 @@ constexpr float kHalf     = 0.5f;
 constexpr float kOneSixth = 1.0f / 6.0f;
 constexpr float kZero     = 0.0f;
 constexpr float kEpsilon  = 1.0e-6f;
+constexpr int   kRecoverySearchSteps   = 96;
+constexpr int   kRecoveryRefineSteps   = 24;
 
 struct FastEvalConfig
 {
@@ -353,6 +355,76 @@ SCurveProfile::PrefixPlan SCurveProfile::BuildStopPrefix(
     return plan;
 }
 
+SCurveProfile::PrefixPlan SCurveProfile::TrimPrefix(const PrefixPlan& plan, const float cut_time)
+{
+    PrefixPlan trimmed{};
+    trimmed.valid = false;
+    if (!plan.valid)
+        return trimmed;
+
+    const float t_end = fminf(fmaxf(cut_time, 0.0f), plan.total_time);
+    const float end_x = SamplePrefixX(plan, t_end);
+    const float end_v = SamplePrefixV(plan, t_end);
+    const float end_a = SamplePrefixA(plan, t_end);
+
+    trimmed            = plan;
+    trimmed.total_time = t_end;
+    trimmed.end_x      = end_x;
+    trimmed.end_v      = end_v;
+    trimmed.end_a      = end_a;
+    trimmed.valid      = IsFinite(t_end) && IsFinite(end_x) && IsFinite(end_v) && IsFinite(end_a);
+
+    if (t_end <= kEpsilon)
+    {
+        trimmed.j_ramp     = 0.0f;
+        trimmed.j_settle   = 0.0f;
+        trimmed.t_ramp     = 0.0f;
+        trimmed.t_hold     = 0.0f;
+        trimmed.t_settle   = 0.0f;
+        trimmed.x_ramp     = plan.x0;
+        trimmed.v_ramp     = plan.v0;
+        trimmed.a_ramp     = plan.a0;
+        trimmed.x_hold     = plan.x0;
+        trimmed.v_hold     = plan.v0;
+        trimmed.a_hold     = plan.a0;
+        return trimmed;
+    }
+
+    const float ramp_end = plan.t_ramp;
+    const float hold_end = plan.t_ramp + plan.t_hold;
+    if (t_end < ramp_end - kEpsilon)
+    {
+        trimmed.t_ramp   = t_end;
+        trimmed.t_hold   = 0.0f;
+        trimmed.t_settle = 0.0f;
+        trimmed.j_settle = 0.0f;
+        trimmed.x_ramp   = end_x;
+        trimmed.v_ramp   = end_v;
+        trimmed.a_ramp   = end_a;
+        trimmed.x_hold   = end_x;
+        trimmed.v_hold   = end_v;
+        trimmed.a_hold   = end_a;
+        return trimmed;
+    }
+
+    if (t_end < hold_end - kEpsilon)
+    {
+        trimmed.t_ramp   = plan.t_ramp;
+        trimmed.t_hold   = t_end - plan.t_ramp;
+        trimmed.t_settle = 0.0f;
+        trimmed.j_settle = 0.0f;
+        trimmed.x_hold   = end_x;
+        trimmed.v_hold   = end_v;
+        trimmed.a_hold   = end_a;
+        return trimmed;
+    }
+
+    trimmed.t_ramp   = plan.t_ramp;
+    trimmed.t_hold   = plan.t_hold;
+    trimmed.t_settle = t_end - hold_end;
+    return trimmed;
+}
+
 float SCurveProfile::SamplePrefixX(const PrefixPlan& plan, const float t)
 {
     if (!plan.valid || t <= 0)
@@ -481,13 +553,13 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     const SidePrepare side_start = PrepareSide(out.vs, out.as, vm, jm);
     const SidePrepare side_end   = PrepareSide(out.ve, -out.ae, vm, jm);
     if (!side_start.valid || !side_end.valid)
-        return SolveStatus::kNeedsStopFallback;
+        return SolveStatus::kNeedsPrefixFallback;
 
     float vp_min = fmaxf(side_start.vp_min, side_end.vp_min);
     if (vp_min < 0)
         vp_min = 0;
     if (vm < vp_min)
-        return SolveStatus::kNeedsStopFallback;
+        return SolveStatus::kNeedsPrefixFallback;
 
     out.t1_pre = side_start.t_pre;
     out.x1_pre = out.xs + dir * side_start.x_pre;
@@ -498,7 +570,7 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
 
     const float len0 = len - side_start.x_pre - side_end.x_pre;
     if (len0 < -S_CURVE_MAX_BS_ERROR)
-        return SolveStatus::kNeedsStopFallback;
+        return SolveStatus::kNeedsPrefixFallback;
 
     const FastEvalConfig fast_eval_cfg{
         am,
@@ -535,14 +607,8 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     float dx1 = 0;
     float dx3 = 0;
 
-#ifdef DEBUG
-    binary_search_count_ = 0;
-#endif
     while (r - l > S_CURVE_MAX_BS_ERROR)
     {
-#ifdef DEBUG
-        binary_search_count_++;
-#endif
         const float          mid = kHalf * (l + r);
         const FastEvalResult mid_eval =
                 EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
@@ -568,7 +634,7 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     dx3        = side_end.x_pre + out.process3.getTotalDistance() - out.xs3;
     delta_d    = dx1 + dx3 - len;
     if (delta_d > S_CURVE_MAX_BS_ERROR)
-        return SolveStatus::kNeedsStopFallback;
+        return SolveStatus::kNeedsPrefixFallback;
 
     out.has_const  = false;
     out.t1         = out.t1_pre + out.process1.getTotalTime() - out.ts1;
@@ -579,6 +645,59 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     out.valid      = true;
     *core          = out;
     return SolveStatus::kSuccess;
+}
+
+bool SCurveProfile::TryPrefixHandoff(
+        const Config& cfg, const PrefixPlan& prefix_seed, const BoundaryState& end, PrefixPlan* prefix,
+        MotionCore* core) const
+{
+    if (prefix == nullptr || core == nullptr || !prefix_seed.valid)
+        return false;
+
+    float prev_t = 0.0f;
+    for (int step = 1; step <= kRecoverySearchSteps; ++step)
+    {
+        const float t = prefix_seed.total_time * static_cast<float>(step) / static_cast<float>(kRecoverySearchSteps);
+        const BoundaryState state{
+            SamplePrefixX(prefix_seed, t),
+            SamplePrefixV(prefix_seed, t),
+            SamplePrefixA(prefix_seed, t),
+        };
+
+        MotionCore candidate{};
+        if (SolveCore(cfg, state, end, &candidate) != SolveStatus::kSuccess)
+        {
+            prev_t = t;
+            continue;
+        }
+
+        float      lo      = prev_t;
+        float      hi      = t;
+        MotionCore hi_core = candidate;
+        for (int iter = 0; iter < kRecoveryRefineSteps; ++iter)
+        {
+            const float         mid = kHalf * (lo + hi);
+            const BoundaryState mid_state{
+                SamplePrefixX(prefix_seed, mid),
+                SamplePrefixV(prefix_seed, mid),
+                SamplePrefixA(prefix_seed, mid),
+            };
+            MotionCore mid_core{};
+            if (SolveCore(cfg, mid_state, end, &mid_core) != SolveStatus::kSuccess)
+            {
+                lo = mid;
+                continue;
+            }
+            hi      = mid;
+            hi_core = mid_core;
+        }
+
+        *prefix = TrimPrefix(prefix_seed, hi);
+        *core   = hi_core;
+        return true;
+    }
+
+    return false;
 }
 
 float SCurveProfile::getReverseDistance(const MotionCore& core, const float tau) const
@@ -732,17 +851,10 @@ SCurveProfile::SCurveProfile(
     SolveStatus status = SolveCore(cfg, start, core_end, &main_core_);
     if (status != SolveStatus::kSuccess)
     {
-        prefix_ = BuildStopPrefix(start, am, jm);
-        if (!prefix_.valid)
+        const PrefixPlan stop_prefix = BuildStopPrefix(start, am, jm);
+        if (!stop_prefix.valid)
             return;
-
-        BoundaryState recovered{
-            prefix_.end_x,
-            prefix_.end_v,
-            prefix_.end_a,
-        };
-        status = SolveCore(cfg, recovered, core_end, &main_core_);
-        if (status != SolveStatus::kSuccess)
+        if (!TryPrefixHandoff(cfg, stop_prefix, core_end, &prefix_, &main_core_))
             return;
     }
 

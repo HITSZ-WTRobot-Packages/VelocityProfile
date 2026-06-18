@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 S_CURVE_MAX_BS_ERROR = 0.001
 EPS = 1.0e-6
+RECOVERY_SEARCH_STEPS = 96
+RECOVERY_REFINE_STEPS = 24
 
 
 @dataclass(slots=True)
@@ -309,6 +311,7 @@ class SCurve:
         self.debug = {
             "used_prefix": False,
             "used_suffix": False,
+            "used_recovery_prefix": False,
             "fallback_stop_prefix": False,
         }
 
@@ -442,6 +445,122 @@ class SCurve:
             dt = t - plan.t_ramp - plan.t_hold
             return plan.a_hold + plan.j_settle * dt
         return plan.end_a
+
+    @classmethod
+    def _trim_prefix(cls, plan: PrefixPlan, cut_time: float) -> PrefixPlan:
+        trimmed = PrefixPlan()
+        if not plan.valid:
+            return trimmed
+
+        t_end = min(max(cut_time, 0.0), plan.total_time)
+        end_x = cls._sample_prefix_x(plan, t_end)
+        end_v = cls._sample_prefix_v(plan, t_end)
+        end_a = cls._sample_prefix_a(plan, t_end)
+
+        trimmed.x0 = plan.x0
+        trimmed.v0 = plan.v0
+        trimmed.a0 = plan.a0
+        trimmed.j_ramp = plan.j_ramp
+        trimmed.j_settle = plan.j_settle
+        trimmed.x_ramp = plan.x_ramp
+        trimmed.v_ramp = plan.v_ramp
+        trimmed.a_ramp = plan.a_ramp
+        trimmed.x_hold = plan.x_hold
+        trimmed.v_hold = plan.v_hold
+        trimmed.a_hold = plan.a_hold
+        trimmed.total_time = t_end
+        trimmed.end_x = end_x
+        trimmed.end_v = end_v
+        trimmed.end_a = end_a
+        trimmed.valid = _is_finite(t_end, end_x, end_v, end_a)
+
+        if t_end <= EPS:
+            trimmed.j_ramp = 0.0
+            trimmed.j_settle = 0.0
+            trimmed.t_ramp = 0.0
+            trimmed.t_hold = 0.0
+            trimmed.t_settle = 0.0
+            trimmed.x_ramp = plan.x0
+            trimmed.v_ramp = plan.v0
+            trimmed.a_ramp = plan.a0
+            trimmed.x_hold = plan.x0
+            trimmed.v_hold = plan.v0
+            trimmed.a_hold = plan.a0
+            return trimmed
+
+        ramp_end = plan.t_ramp
+        hold_end = plan.t_ramp + plan.t_hold
+        if t_end < ramp_end - EPS:
+            trimmed.t_ramp = t_end
+            trimmed.t_hold = 0.0
+            trimmed.t_settle = 0.0
+            trimmed.j_settle = 0.0
+            trimmed.x_ramp = end_x
+            trimmed.v_ramp = end_v
+            trimmed.a_ramp = end_a
+            trimmed.x_hold = end_x
+            trimmed.v_hold = end_v
+            trimmed.a_hold = end_a
+            return trimmed
+
+        if t_end < hold_end - EPS:
+            trimmed.t_ramp = plan.t_ramp
+            trimmed.t_hold = t_end - plan.t_ramp
+            trimmed.t_settle = 0.0
+            trimmed.j_settle = 0.0
+            trimmed.x_hold = end_x
+            trimmed.v_hold = end_v
+            trimmed.a_hold = end_a
+            return trimmed
+
+        trimmed.t_ramp = plan.t_ramp
+        trimmed.t_hold = plan.t_hold
+        trimmed.t_settle = t_end - hold_end
+        return trimmed
+
+    def _try_prefix_handoff(
+            self,
+            prefix_seed: PrefixPlan,
+            core_end: BoundaryState,
+            vm: float,
+            am: float,
+            jm: float) -> tuple[PrefixPlan | None, MotionCore | None]:
+        if not prefix_seed.valid:
+            return None, None
+
+        prev_t = 0.0
+        for step in range(1, RECOVERY_SEARCH_STEPS + 1):
+            t = prefix_seed.total_time * step / RECOVERY_SEARCH_STEPS
+            state = BoundaryState(
+                x=self._sample_prefix_x(prefix_seed, t),
+                v=self._sample_prefix_v(prefix_seed, t),
+                a=self._sample_prefix_a(prefix_seed, t),
+            )
+            core = self._solve_core(state, core_end, vm, am, jm)
+            if core is None:
+                prev_t = t
+                continue
+
+            lo = prev_t
+            hi = t
+            hi_core = core
+            for _ in range(RECOVERY_REFINE_STEPS):
+                mid = 0.5 * (lo + hi)
+                mid_state = BoundaryState(
+                    x=self._sample_prefix_x(prefix_seed, mid),
+                    v=self._sample_prefix_v(prefix_seed, mid),
+                    a=self._sample_prefix_a(prefix_seed, mid),
+                )
+                mid_core = self._solve_core(mid_state, core_end, vm, am, jm)
+                if mid_core is None:
+                    lo = mid
+                    continue
+                hi = mid
+                hi_core = mid_core
+
+            return self._trim_prefix(prefix_seed, hi), hi_core
+
+        return None, None
 
     def _solve_core(
             self,
@@ -679,15 +798,17 @@ class SCurve:
         if not stop_prefix.valid:
             return self.S_CURVE_FAILED
 
-        recovered = BoundaryState(stop_prefix.end_x, stop_prefix.end_v, stop_prefix.end_a)
-        core = self._solve_core(recovered, core_end, vm, am, jm)
-        if core is None:
+        prefix, core = self._try_prefix_handoff(stop_prefix, core_end, vm, am, jm)
+        if prefix is None or core is None:
             return self.S_CURVE_FAILED
 
-        self.prefix = stop_prefix
+        self.prefix = prefix
         self.main_core = core
         self.debug["used_prefix"] = True
-        self.debug["fallback_stop_prefix"] = True
+        if self.prefix.total_time < stop_prefix.total_time - S_CURVE_MAX_BS_ERROR:
+            self.debug["used_recovery_prefix"] = True
+        else:
+            self.debug["fallback_stop_prefix"] = True
         self.success = True
         self.total_time = self.prefix.total_time + self.main_core.total_time + (
             self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0

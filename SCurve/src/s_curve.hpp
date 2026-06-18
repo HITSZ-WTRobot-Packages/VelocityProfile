@@ -79,7 +79,7 @@ private:
     {
         kSuccess,
         kInvalidInput,
-        kNeedsStopFallback,
+        kNeedsPrefixFallback,
         kInternalError,
     };
 
@@ -174,6 +174,7 @@ private:
     [[nodiscard]] static BoundaryState EvaluateConstantJerk(
             const BoundaryState& state, float jerk, float dt);
     [[nodiscard]] static PrefixPlan BuildStopPrefix(const BoundaryState& start, float am, float jm);
+    [[nodiscard]] static PrefixPlan TrimPrefix(const PrefixPlan& plan, float cut_time);
     [[nodiscard]] static float        SamplePrefixX(const PrefixPlan& plan, float t);
     [[nodiscard]] static float        SamplePrefixV(const PrefixPlan& plan, float t);
     [[nodiscard]] static float        SamplePrefixA(const PrefixPlan& plan, float t);
@@ -182,6 +183,9 @@ private:
 
     [[nodiscard]] SolveStatus SolveCore(
             const Config& cfg, const BoundaryState& start, const BoundaryState& end, MotionCore* core) const;
+    [[nodiscard]] bool TryPrefixHandoff(
+            const Config& cfg, const PrefixPlan& prefix_seed, const BoundaryState& end, PrefixPlan* prefix,
+            MotionCore* core) const;
 
     [[nodiscard]] float getReverseDistance(const MotionCore& core, float tau) const;
     [[nodiscard]] float getReverseVelocity(const MotionCore& core, float tau) const;
