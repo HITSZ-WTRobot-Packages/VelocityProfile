@@ -263,12 +263,12 @@ def chassis_plot(start: Posture,
 if __name__ == "__main__":
     chassis_plot(
         start=Posture(x=0.0, y=0, yaw=0),
-        end=Posture(x=2.0, y=0, yaw=0),
+        end=Posture(x=-129.0, y=0, yaw=0),
         start_velocity=Velocity(vx=0.9, vy=0.0, wz=0),
         start_accel=Acceleration(ax=1.0, ay=0, ayaw=0),
         end_velocity=Velocity(vx=0.0, vy=0, wz=0.0),
         end_accel=Acceleration(ax=0.0, ay=0.0, ayaw=0.0),
-        x_limit=Limit(v_max=1.0, a_max=1.0, j_max=2.0),
+        x_limit=Limit(v_max=360.0, a_max=720.0, j_max=1440.0),
         y_limit=Limit(v_max=1, a_max=1, j_max=2),
         yaw_limit=Limit(v_max=180, a_max=60, j_max=360)
     )

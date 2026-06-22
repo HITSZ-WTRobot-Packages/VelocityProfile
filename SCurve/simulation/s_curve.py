@@ -805,21 +805,23 @@ class SCurve:
 
         l = vp_min
         r = vm
-        delta_d = len0
+        l_eval = min_eval
         while r - l > S_CURVE_MAX_BS_ERROR:
             mid = 0.5 * (l + r)
             mid_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, mid)
             delta_d = mid_eval.delta
-            if abs(delta_d) <= S_CURVE_MAX_BS_ERROR:
-                l = mid
-                r = mid
-                break
             if delta_d > 0.0:
                 r = mid
             else:
                 l = mid
+                l_eval = mid_eval
+                if abs(delta_d) <= S_CURVE_MAX_BS_ERROR:
+                    break
 
-        vp = 0.5 * (l + r)
+        if l_eval.delta > 0.0:
+            return None
+
+        vp = l
         core.process1.init(side_start.v_base, vp, am, jm)
         core.process3.init(side_end.v_base, vp, am, jm)
         core.xs1 = core.process1.get_distance(core.ts1)
@@ -827,12 +829,13 @@ class SCurve:
         dx1 = side_start.x_pre + core.process1.total_distance - core.xs1
         dx3 = side_end.x_pre + core.process3.total_distance - core.xs3
         delta_d = dx1 + dx3 - length
-        if delta_d > S_CURVE_MAX_BS_ERROR:
+        if delta_d > 0.0:
             return None
 
-        core.has_const = False
+        residual_const = -delta_d if delta_d < 0.0 else 0.0
+        core.has_const = residual_const > 0.0
         core.t1 = core.t1_pre + core.process1.total_time - core.ts1
-        core.t2 = core.t1
+        core.t2 = core.t1 + (residual_const / vp if core.has_const else 0.0)
         core.total_time = core.t2 + core.t3_pre + core.process3.total_time - core.ts3
         core.x1 = core.xs + core.direction * dx1
         core.vp = vp
