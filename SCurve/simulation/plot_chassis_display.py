@@ -263,6 +263,7 @@ def chassis_plot(start: Posture,
 if __name__ == "__main__":
     chassis_plot(
         start=Posture(x=0.0, y=0, yaw=0),
+
         end=Posture(x=-129.0, y=0, yaw=0),
         start_velocity=Velocity(vx=0.9, vy=0.0, wz=0),
         start_accel=Acceleration(ax=1.0, ay=0, ayaw=0),
