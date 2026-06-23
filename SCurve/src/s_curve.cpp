@@ -15,6 +15,7 @@ constexpr float kHalf     = 0.5f;
 constexpr float kOneSixth = 1.0f / 6.0f;
 constexpr float kZero     = 0.0f;
 constexpr float kEpsilon  = 1.0e-6f;
+constexpr float kDistanceTolerance = S_CURVE_MAX_BS_ERROR;
 constexpr int   kRecoverySearchSteps   = 96;
 constexpr int   kRecoveryRefineSteps   = 24;
 constexpr int   kPeakVelocityBisectIterations = 64;
@@ -721,7 +722,7 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     out.ts3    = side_end.t_shift;
 
     const float len0 = len - side_start.x_pre - side_end.x_pre;
-    if (len0 < -S_CURVE_MAX_BS_ERROR)
+    if (len0 < -kDistanceTolerance)
         return SolveStatus::kNeedsPrefixFallback;
 
     const FastEvalConfig fast_eval_cfg{
@@ -735,7 +736,7 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     const FastEvalSide end_eval{ side_end.v_base, side_end.x_pre, side_end.t_shift };
 
     const FastEvalResult min_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vp_min);
-    if (min_eval.delta > S_CURVE_MAX_BS_ERROR)
+    if (min_eval.delta > kDistanceTolerance)
         return SolveStatus::kNeedsPrefixFallback;
 
     const FastEvalResult vm_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vm);
@@ -760,7 +761,6 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     float          l      = vp_min;
     float          r      = vm;
     FastEvalResult l_eval = min_eval;
-    FastEvalResult r_eval = vm_eval;
     for (int iter = 0; iter < kPeakVelocityBisectIterations; ++iter)
     {
         const float mid = kHalf * (l + r);
@@ -768,28 +768,20 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
             break;
 
         const FastEvalResult mid_eval = EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
-        if (fabsf(mid_eval.delta) <= S_CURVE_MAX_BS_ERROR)
-        {
-            l      = mid;
-            l_eval = mid_eval;
-            r      = mid;
-            r_eval = mid_eval;
-            break;
-        }
-
         if (mid_eval.delta > 0)
         {
-            r      = mid;
-            r_eval = mid_eval;
+            r = mid;
         }
         else
         {
             l      = mid;
             l_eval = mid_eval;
+            if (fabsf(mid_eval.delta) <= kDistanceTolerance)
+                break;
         }
     }
 
-    if (l_eval.delta > kEpsilon)
+    if (l_eval.delta > kDistanceTolerance)
         return SolveStatus::kNeedsPrefixFallback;
 
     const float vp = l;
@@ -800,10 +792,12 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     const float dx1     = side_start.x_pre + out.process1.getTotalDistance() - out.xs1;
     const float dx3     = side_end.x_pre + out.process3.getTotalDistance() - out.xs3;
     const float delta_d = dx1 + dx3 - len;
-    if (delta_d > kEpsilon)
+    // EvaluateDistanceDelta() and the full profile recomputation are not bit-identical.
+    // Keep the same distance tolerance here to avoid fallback on accepted edge cases.
+    if (delta_d > kDistanceTolerance)
         return SolveStatus::kNeedsPrefixFallback;
 
-    const float residual_const = delta_d < -kEpsilon ? -delta_d : 0.0f;
+    const float residual_const = delta_d < 0.0f ? -delta_d : 0.0f;
     out.has_const             = residual_const > 0.0f;
     out.t1                    = out.t1_pre + out.process1.getTotalTime() - out.ts1;
     out.t2                    = out.t1 + (out.has_const ? residual_const / vp : 0.0f);
