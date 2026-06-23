@@ -781,7 +781,7 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
         }
     }
 
-    if (l_eval.delta > 0.0f)
+    if (l_eval.delta > kDistanceTolerance)
         return SolveStatus::kNeedsPrefixFallback;
 
     const float vp = l;
@@ -792,7 +792,9 @@ SCurveProfile::SolveStatus SCurveProfile::SolveCore(
     const float dx1     = side_start.x_pre + out.process1.getTotalDistance() - out.xs1;
     const float dx3     = side_end.x_pre + out.process3.getTotalDistance() - out.xs3;
     const float delta_d = dx1 + dx3 - len;
-    if (delta_d > 0.0f)
+    // EvaluateDistanceDelta() and the full profile recomputation are not bit-identical.
+    // Keep the same distance tolerance here to avoid fallback on accepted edge cases.
+    if (delta_d > kDistanceTolerance)
         return SolveStatus::kNeedsPrefixFallback;
 
     const float residual_const = delta_d < 0.0f ? -delta_d : 0.0f;

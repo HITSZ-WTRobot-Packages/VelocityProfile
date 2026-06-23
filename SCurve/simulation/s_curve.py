@@ -818,7 +818,7 @@ class SCurve:
                 if abs(delta_d) <= S_CURVE_MAX_BS_ERROR:
                     break
 
-        if l_eval.delta > 0.0:
+        if l_eval.delta > S_CURVE_MAX_BS_ERROR:
             return None
 
         vp = l
@@ -829,7 +829,7 @@ class SCurve:
         dx1 = side_start.x_pre + core.process1.total_distance - core.xs1
         dx3 = side_end.x_pre + core.process3.total_distance - core.xs3
         delta_d = dx1 + dx3 - length
-        if delta_d > 0.0:
+        if delta_d > S_CURVE_MAX_BS_ERROR:
             return None
 
         residual_const = -delta_d if delta_d < 0.0 else 0.0
