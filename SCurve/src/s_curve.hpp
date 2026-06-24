@@ -36,6 +36,31 @@ public:
         }
     };
 
+    enum class FailureCode : uint8_t
+    {
+        None                        = 0,
+        NonFiniteInput              = 1,
+        InvalidLimit                = 2,
+        InvalidEndState             = 3,
+        SolveCoreFailed             = 4,
+        VelocityClampRecoveryFailed = 5,
+        StopPrefixFailed            = 6,
+        PrefixHandoffFailed         = 7,
+        InternalError               = 8,
+    };
+
+    struct FailureInfo
+    {
+        Config      cfg{};
+        float       xs{};
+        float       vs{};
+        float       as{};
+        float       xe{};
+        float       ve{};
+        float       ae{};
+        FailureCode code{ FailureCode::None };
+    };
+
     SCurveProfile(
             const Config& cfg, float xs, float vs, float as, float xe, float ve = 0, float ae = 0);
 
@@ -44,6 +69,7 @@ public:
     [[nodiscard]] float CalcA(float t) const override;
     [[nodiscard]] float getTotalTime() const override { return total_time_; }
     [[nodiscard]] bool success() const override { return success_; }
+    [[nodiscard]] const FailureInfo& failureInfo() const { return failure_info_; }
 
 private:
     class SCurveAccel
@@ -211,6 +237,7 @@ private:
     [[nodiscard]] float SampleCoreA(const MotionCore& core, float t) const;
 
     bool       success_{ false };
+    FailureInfo failure_info_{};
     PrefixPlan prefix_{};
     MotionCore main_core_{};
     SuffixPlan suffix_{};
