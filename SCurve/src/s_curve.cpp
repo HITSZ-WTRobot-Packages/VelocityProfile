@@ -1026,10 +1026,12 @@ SCurveProfile::SCurveProfile(
     suffix_    = {};
     success_   = false;
     total_time_ = 0;
+    failure_info_ = { cfg, xs, vs, as, xe, ve, ae, FailureCode::None };
 
     if (!IsFinite(cfg.max_spd) || !IsFinite(cfg.max_acc) || !IsFinite(cfg.max_jerk) || !IsFinite(xs) ||
         !IsFinite(xe) || !IsFinite(vs) || !IsFinite(as) || !IsFinite(ve) || !IsFinite(ae))
     {
+        failure_info_.code = FailureCode::NonFiniteInput;
         return;
     }
 
@@ -1037,9 +1039,15 @@ SCurveProfile::SCurveProfile(
     const float am = fabsf(cfg.max_acc);
     const float jm = fabsf(cfg.max_jerk);
     if (vm <= 0 || am <= 0 || jm <= 0)
+    {
+        failure_info_.code = FailureCode::InvalidLimit;
         return;
+    }
     if (fabsf(ve) > vm || fabsf(ae) > am)
+    {
+        failure_info_.code = FailureCode::InvalidEndState;
         return;
+    }
 
     BoundaryState start{ xs, vs, as };
     BoundaryState end{ xe, ve, ae };
@@ -1069,9 +1077,16 @@ SCurveProfile::SCurveProfile(
 
         const PrefixPlan stop_prefix = BuildStopPrefix(start, am, jm);
         if (!stop_prefix.valid)
+        {
+            failure_info_.code = status == SolveStatus::kInternalError ? FailureCode::InternalError :
+                                                                         FailureCode::StopPrefixFailed;
             return;
+        }
         if (!TryPrefixHandoff(cfg, stop_prefix, core_end, &prefix_, &main_core_))
+        {
+            failure_info_.code = FailureCode::PrefixHandoffFailed;
             return;
+        }
     }
 
     success_    = true;
