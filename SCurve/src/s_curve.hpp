@@ -101,20 +101,6 @@ private:
         float vp_;
     };
 
-    enum class SolveStatus : uint8_t
-    {
-        kSuccess,
-        kNeedsPrefixFallback,
-        kInternalError,
-    };
-
-    struct BoundaryState
-    {
-        float x;
-        float v;
-        float a;
-    };
-
     struct SidePrepare
     {
         float t_pre;
@@ -125,123 +111,48 @@ private:
         bool  valid;
     };
 
-    struct PrefixPlan
-    {
-        float x0;
-        float v0;
-        float a0;
-        float j_ramp;
-        float j_settle;
+    bool success_{ false };
 
-        float t_ramp;
-        float t_hold;
-        float t_settle;
+    bool  has_const_{ false };
+    float direction_{ 1.0f };
+    float jm_{ 0.0f };
+    float vp_{ 0.0f };
 
-        float x_ramp;
-        float v_ramp;
-        float a_ramp;
+    float xs_{ 0.0f };
+    float xe_{ 0.0f };
+    float ve_{ 0.0f };
+    float ae_{ 0.0f };
 
-        float x_hold;
-        float v_hold;
-        float a_hold;
+    float vs_{ 0.0f };
+    float as_{ 0.0f };
+    float t1_pre_{ 0.0f };
+    float x1_pre_{ 0.0f };
+    float ts1_{ 0.0f };
+    float xs1_{ 0.0f };
 
-        float total_time;
-        float end_x;
-        float end_v;
-        float end_a;
+    float t3_pre_{ 0.0f };
+    float x3_pre_{ 0.0f };
+    float ts3_{ 0.0f };
+    float xs3_{ 0.0f };
 
-        bool valid;
-    };
+    float t1_{ 0.0f };
+    float t2_{ 0.0f };
+    float x1_{ 0.0f };
 
-    struct MotionCore
-    {
-        bool  valid;
-        bool  has_const;
-        float direction;
-        float xs;
-        float xe;
-        float vs;
-        float as;
-        float ve;
-        float ae;
-        float jm;
-        float vp;
+    float total_time_{ 0.0f };
 
-        float t1_pre;
-        float x1_pre;
-        float ts1;
-        float xs1;
+    SCurveAccel process1_{};
+    SCurveAccel process3_{};
 
-        float t3_pre;
-        float x3_pre;
-        float ts3;
-        float xs3;
-
-        float t1;
-        float t2;
-        float x1;
-        float total_time;
-
-        SCurveAccel process1;
-        SCurveAccel process3;
-    };
-
-    struct SuffixPlan
-    {
-        PrefixPlan reverse_plan;
-        float      start_x;
-        bool       valid;
-    };
-
-    [[nodiscard]] static bool IsFinite(float value);
-    [[nodiscard]] static float Sign(float value);
-
-    [[nodiscard]] static BoundaryState EvaluateConstantJerk(
-            const BoundaryState& state, float jerk, float dt);
-    [[nodiscard]] static PrefixPlan BuildStopPrefix(const BoundaryState& start, float am, float jm);
-    [[nodiscard]] static PrefixPlan ShiftPrefixWithVelocityBias(
-            const PrefixPlan& plan, float x_origin, float velocity_bias);
-    [[nodiscard]] static PrefixPlan MergePrefixWithLeadingJerk(
-            const BoundaryState& start, float jerk, float lead_time, const PrefixPlan& tail);
-    [[nodiscard]] static PrefixPlan BuildVelocityClampPrefix(
-            const BoundaryState& start, float target_v, float am, float jm);
-    [[nodiscard]] static bool GetVelocityClampTarget(
-            const BoundaryState& start, float vm, float jm, float* target_v);
-    [[nodiscard]] static bool       PrecheckCore(
-            const BoundaryState& start, const BoundaryState& end, float vm, float jm);
-    [[nodiscard]] static PrefixPlan TrimPrefix(const PrefixPlan& plan, float cut_time);
-    [[nodiscard]] static float        SamplePrefixX(const PrefixPlan& plan, float t);
-    [[nodiscard]] static float        SamplePrefixV(const PrefixPlan& plan, float t);
-    [[nodiscard]] static float        SamplePrefixA(const PrefixPlan& plan, float t);
-
-    [[nodiscard]] static SidePrepare PrepareSide(float v0, float a0, float vm, float jm);
-
-    [[nodiscard]] SolveStatus SolveCore(
-            const Config& cfg, const BoundaryState& start, const BoundaryState& end, MotionCore* core) const;
-    [[nodiscard]] bool TryVelocityClampRecovery(
-            const Config& cfg, const BoundaryState& start, const BoundaryState& end, PrefixPlan* prefix,
-            MotionCore* core) const;
-    [[nodiscard]] bool TryPrefixHandoff(
-            const Config& cfg, const PrefixPlan& prefix_seed, const BoundaryState& end, PrefixPlan* prefix,
-            MotionCore* core) const;
-
-    [[nodiscard]] float getReverseDistance(const MotionCore& core, float tau) const;
-    [[nodiscard]] float getReverseVelocity(const MotionCore& core, float tau) const;
-    [[nodiscard]] float getReverseAcceleration(const MotionCore& core, float tau) const;
-    [[nodiscard]] float SampleSuffixX(const SuffixPlan& suffix, float elapsed) const;
-    [[nodiscard]] float SampleSuffixV(const SuffixPlan& suffix, float elapsed) const;
-    [[nodiscard]] float SampleSuffixA(const SuffixPlan& suffix, float elapsed) const;
-
-    [[nodiscard]] float SampleCoreX(const MotionCore& core, float t) const;
-    [[nodiscard]] float SampleCoreV(const MotionCore& core, float t) const;
-    [[nodiscard]] float SampleCoreA(const MotionCore& core, float t) const;
-
-    bool       success_{ false };
     FailureInfo failure_info_{};
-    PrefixPlan prefix_{};
-    MotionCore main_core_{};
-    SuffixPlan suffix_{};
-    float      total_time_{ 0.0f };
+
+    [[nodiscard]] float getReverseDistance(float tau) const;
+    [[nodiscard]] float getReverseVelocity(float tau) const;
+    [[nodiscard]] float getReverseAcceleration(float tau) const;
+
+#ifdef DEBUG
+    uint32_t binary_search_count_{ 0 };
+#endif
 };
 
 } // namespace velocity_profile
