@@ -304,6 +304,104 @@ SCurveProfile::SCurveProfile(
         return;
     }
 
+    // Try old-style algorithm first (no preprocessing).
+    // When inputs are valid for the old version, this guarantees identical results.
+    {
+        float vs0 = vs, as0 = as, ve0 = ve, ae0 = ae;
+        auto tryOldStyle = [&](float sv, float sa, float ev, float ea) -> bool {
+            if (fabsf(sv) > vm || fabsf(sa) > am || fabsf(ev) > vm || fabsf(ea) > am)
+                return false;
+
+            const auto prepSide = [vm, jm](float v0, float a0) {
+                SidePrepare r{};
+                r.valid = true;
+                if (a0 < 0) {
+                    r.v_base = v0 - kHalf * a0 * a0 / jm;
+                    if (fabsf(r.v_base) > vm) { r.valid = false; return r; }
+                    r.vp_min = r.v_base;
+                    r.t_pre = -a0 / jm;
+                    r.x_pre = v0 * r.t_pre + (1.0f/3.0f) * a0 * r.t_pre * r.t_pre;
+                    r.t_shift = 0;
+                } else {
+                    r.vp_min = v0 + kHalf * a0 * a0 / jm;
+                    if (vm < r.vp_min) { r.valid = false; return r; }
+                    r.t_pre = 0; r.x_pre = 0;
+                    r.t_shift = a0 / jm;
+                    r.v_base = v0 - kHalf * a0 * r.t_shift;
+                }
+                if (r.vp_min < 0) r.vp_min = 0;
+                return r;
+            };
+
+            SidePrepare s = prepSide(sv, sa);
+            if (!s.valid) return false;
+            SidePrepare e = prepSide(ev, -ea);
+            if (!e.valid) return false;
+
+            float vpm = fmaxf(s.vp_min, e.vp_min);
+            if (vpm < 0) vpm = 0;
+            if (vm < vpm) return false;
+
+            float l0 = len - s.x_pre - e.x_pre;
+            if (l0 < -S_CURVE_MAX_BS_ERROR) return false;
+
+            FastEvalConfig fe{am, jm, am*am, am/jm, 0.5f/am};
+            FastEvalSide se{s.v_base, s.x_pre, s.t_shift};
+            FastEvalSide ee{e.v_base, e.x_pre, e.t_shift};
+
+            FastEvalResult vme = EvaluateDistanceDelta(fe, se, ee, len, vm);
+            float xc = -vme.delta;
+            if (xc > 0) {
+                process1_.init(s.v_base, vm, am, jm);
+                process3_.init(e.v_base, vm, am, jm);
+                xs1_ = process1_.getDistance(s.t_shift);
+                xs3_ = process3_.getDistance(e.t_shift);
+                t1_pre_ = s.t_pre; x1_pre_ = xs_ + direction_ * s.x_pre; ts1_ = s.t_shift;
+                t3_pre_ = e.t_pre; x3_pre_ = e.x_pre; ts3_ = e.t_shift;
+                has_const_ = true;
+                t1_ = t1_pre_ + process1_.getTotalTime() - ts1_;
+                t2_ = t1_ + xc / vm;
+                total_time_ = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
+                x1_ = xs_ + direction_ * vme.dx1;
+                vp_ = vm; vs_ = sv; as_ = sa; ve_ = ev; ae_ = ea;
+                success_ = true;
+                return true;
+            }
+
+            float l = vpm, r = vm, dd = l0;
+            while (r - l > S_CURVE_MAX_BS_ERROR) {
+                float mid = kHalf * (l + r);
+                auto me = EvaluateDistanceDelta(fe, se, ee, len, mid);
+                dd = me.delta;
+                if (fabsf(dd) <= S_CURVE_MAX_BS_ERROR) { r = l = mid; break; }
+                if (dd > 0) r = mid; else l = mid;
+            }
+            float vp = kHalf * (l + r);
+            process1_.init(s.v_base, vp, am, jm);
+            process3_.init(e.v_base, vp, am, jm);
+            xs1_ = process1_.getDistance(s.t_shift);
+            xs3_ = process3_.getDistance(e.t_shift);
+            float d1 = s.x_pre + process1_.getTotalDistance() - xs1_;
+            float d3 = e.x_pre + process3_.getTotalDistance() - xs3_;
+            dd = d1 + d3 - len;
+            if (dd > S_CURVE_MAX_BS_ERROR) return false;
+
+            t1_pre_ = s.t_pre; x1_pre_ = xs_ + direction_ * s.x_pre; ts1_ = s.t_shift;
+            t3_pre_ = e.t_pre; x3_pre_ = e.x_pre; ts3_ = e.t_shift;
+            has_const_ = false;
+            t1_ = t1_pre_ + process1_.getTotalTime() - ts1_;
+            t2_ = t1_;
+            total_time_ = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
+            x1_ = xs_ + direction_ * d1;
+            vp_ = vp; vs_ = sv; as_ = sa; ve_ = ev; ae_ = ea;
+            success_ = true;
+            return true;
+        };
+
+        if (tryOldStyle(vs, as, ve, ae)) return;
+        vs = vs0; as = as0; ve = ve0; ae = ae0;
+    }
+
     // Clamp start/end velocity to [-vm, vm]
     vs = std::clamp(vs, -vm, vm);
     ve = std::clamp(ve, -vm, vm);
@@ -374,8 +472,8 @@ SCurveProfile::SCurveProfile(
         float scale = len / pre_total;
         as *= scale;
         ae *= scale;
-        as = std::clamp(as, -max_start_a, max_start_a);
-        ae = std::clamp(ae, -max_end_a, max_end_a);
+        as  = std::clamp(as, -max_start_a, max_start_a);
+        ae  = std::clamp(ae, -max_end_a, max_end_a);
         as_ = as;
         ae_ = ae;
     }
@@ -413,7 +511,7 @@ SCurveProfile::SCurveProfile(
     //     return;
     // }
 
-    const float len0 = len - start.x_pre - endr.x_pre;
+    // const float len0 = len - start.x_pre - endr.x_pre;
     // len0 < -EPS is prevented by pre-scaling as/ae before prepareSide
     // if (len0 < -S_CURVE_MAX_BS_ERROR)
     // {
@@ -436,13 +534,13 @@ SCurveProfile::SCurveProfile(
         float scale = len / (min_eval.dx1 + min_eval.dx3);
         as *= scale;
         ae *= scale;
-        as = std::clamp(as, -max_start_a, max_start_a);
-        ae = std::clamp(ae, -max_end_a, max_end_a);
+        as  = std::clamp(as, -max_start_a, max_start_a);
+        ae  = std::clamp(ae, -max_end_a, max_end_a);
         as_ = as;
         ae_ = ae;
 
         start = prepareSide(vs, as);
-        endr = prepareSide(ve, -ae);
+        endr  = prepareSide(ve, -ae);
 
         t1_pre_ = start.t_pre;
         x1_pre_ = xs + dir * start.x_pre;
@@ -463,12 +561,12 @@ SCurveProfile::SCurveProfile(
                 EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vp_min);
         if (retry_eval.delta > S_CURVE_MAX_BS_ERROR)
         {
-            as = -std::min(am, sqrtf(2.0f * jm * fabsf(vs)));
-            as = std::clamp(as, -max_start_a, max_start_a);
+            as  = -std::min(am, sqrtf(2.0f * jm * fabsf(vs)));
+            as  = std::clamp(as, -max_start_a, max_start_a);
             as_ = as;
 
             start = prepareSide(vs, as);
-            endr = prepareSide(ve, -ae);
+            endr  = prepareSide(ve, -ae);
 
             t1_pre_ = start.t_pre;
             x1_pre_ = xs + dir * start.x_pre;
@@ -491,14 +589,14 @@ SCurveProfile::SCurveProfile(
             {
                 float vs_scale = len / (vs_eval.dx1 + vs_eval.dx3);
                 vs *= vs_scale;
-                vs = std::clamp(vs, -vm, vm);
+                vs  = std::clamp(vs, -vm, vm);
                 vs_ = vs;
                 ve *= vs_scale;
-                ve = std::clamp(ve, -vm, vm);
+                ve  = std::clamp(ve, -vm, vm);
                 ve_ = ve;
 
                 start = prepareSide(vs, as);
-                endr = prepareSide(ve, -ae);
+                endr  = prepareSide(ve, -ae);
 
                 t1_pre_ = start.t_pre;
                 x1_pre_ = xs + dir * start.x_pre;
@@ -547,7 +645,8 @@ SCurveProfile::SCurveProfile(
     float l, r, delta_d, dx1, dx3;
     for (int retry = 0; retry < 4; retry++)
     {
-        l = vp_min; r = vm;
+        l = vp_min;
+        r = vm;
 #ifdef DEBUG
         binary_search_count_ = 0;
 #endif
@@ -583,21 +682,25 @@ SCurveProfile::SCurveProfile(
         if (delta_d <= S_CURVE_MAX_BS_ERROR)
         {
             vp_ = vp;
-            break;  // undershoot or exact: handled below
+            break; // undershoot or exact: handled below
         }
 
         // Overshoot: reduce vs/ve and retry
         float scale = len / (dx1 + dx3);
-        if (scale > 0.999f) { vp_ = vp; break; }
+        if (scale > 0.999f)
+        {
+            vp_ = vp;
+            break;
+        }
         vs *= scale;
-        vs = std::clamp(vs, -vm, vm);
+        vs  = std::clamp(vs, -vm, vm);
         vs_ = vs;
         ve *= scale;
-        ve = std::clamp(ve, -vm, vm);
+        ve  = std::clamp(ve, -vm, vm);
         ve_ = ve;
 
         start = prepareSide(vs, as);
-        endr = prepareSide(ve, -ae);
+        endr  = prepareSide(ve, -ae);
 
         t1_pre_ = start.t_pre;
         x1_pre_ = xs_ + direction_ * start.x_pre;
@@ -607,7 +710,8 @@ SCurveProfile::SCurveProfile(
         ts3_    = endr.t_shift;
 
         vp_min = fmaxf(start.vp_min, endr.vp_min);
-        if (vp_min < 0) vp_min = 0;
+        if (vp_min < 0)
+            vp_min = 0;
 
         start_eval = FastEvalSide{ start.v_base, start.x_pre, start.t_shift };
         end_eval   = FastEvalSide{ endr.v_base, endr.x_pre, endr.t_shift };
@@ -615,10 +719,10 @@ SCurveProfile::SCurveProfile(
 
     // Absorb undershoot with constant-velocity phase
     float residual = delta_d < 0 ? -delta_d : 0;
-    has_const_  = residual > 0;
-    t1_         = t1_pre_ + process1_.getTotalTime() - ts1_;
-    t2_         = t1_ + (has_const_ ? residual / vp_ : 0);
-    total_time_ = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
+    has_const_     = residual > 0;
+    t1_            = t1_pre_ + process1_.getTotalTime() - ts1_;
+    t2_            = t1_ + (has_const_ ? residual / vp_ : 0);
+    total_time_    = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
 
     x1_ = xs_ + direction_ * dx1;
 
