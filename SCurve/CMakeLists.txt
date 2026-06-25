@@ -1,10 +1,19 @@
 add_library(VelocityProfileSCurve STATIC
-        "src/s_curve.cpp"
+    "./src/s_curve.cpp"
 )
 
 target_include_directories(VelocityProfileSCurve
-        PUBLIC
-        src
+    PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_options(VelocityProfileSCurve PRIVATE
+    -Ofast
+    -ffast-math
+)
+
+target_compile_definitions(VelocityProfileSCurve PUBLIC
+    ARM_MATH_CM4
 )
 
 # link dependencies if any

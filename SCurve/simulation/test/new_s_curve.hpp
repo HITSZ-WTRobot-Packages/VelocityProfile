@@ -3,18 +3,18 @@
  * @author  syhanjin LIJunHong659
  * @date    2026-01-28
  */
-#ifndef S_CURVE_HPP
-#define S_CURVE_HPP
+#ifndef NEW_S_CURVE_HPP
+#define NEW_S_CURVE_HPP
 
 #include <cstdint>
 
-#include "IVelocityProfile.hpp"
+#include "new_ivelocity.hpp"
 
-#ifndef S_CURVE_MAX_BS_ERROR
-#    define S_CURVE_MAX_BS_ERROR (0.001f)
+#ifndef NEW_S_CURVE_MAX_BS_ERROR
+#    define NEW_S_CURVE_MAX_BS_ERROR (0.001f)
 #endif
 
-namespace velocity_profile
+namespace scurve_new
 {
 
 class SCurveProfile final : public IVelocityProfile
@@ -155,6 +155,6 @@ private:
 #endif
 };
 
-} // namespace velocity_profile
+} // namespace scurve_new
 
-#endif // S_CURVE_HPP
+#endif // NEW_S_CURVE_HPP
