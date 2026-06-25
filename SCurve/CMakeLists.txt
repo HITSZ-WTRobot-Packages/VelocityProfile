@@ -10,5 +10,7 @@ target_include_directories(VelocityProfileSCurve
 # link dependencies if any
 target_link_libraries(VelocityProfileSCurve PUBLIC VelocityProfile::Core)
 
+target_compile_options(VelocityProfileSCurve PRIVATE -Ofast)
+
 # alias for external use
 add_library(VelocityProfile::SCurve ALIAS VelocityProfileSCurve)

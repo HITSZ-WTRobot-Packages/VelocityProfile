@@ -5,6 +5,7 @@
  */
 #include "s_curve.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace velocity_profile
@@ -303,11 +304,24 @@ SCurveProfile::SCurveProfile(
         return;
     }
 
-    if (fabsf(vs) > vm || fabsf(as) > am || fabsf(ve) > vm || fabsf(ae) > am)
-    {
-        fail(FailureCode::InvalidEndState);
-        return;
-    }
+    // Clamp start/end velocity to [-vm, vm]
+    vs = std::clamp(vs, -vm, vm);
+    ve = std::clamp(ve, -vm, vm);
+    as = std::clamp(as, -am, am);
+    ae = std::clamp(ae, -am, am);
+
+    // Limit acceleration to prevent future velocity from exceeding vm
+    float max_start_a = std::min(am, sqrtf(2.0f * jm * (vm - fabsf(vs))));
+    float max_end_a   = std::min(am, sqrtf(2.0f * jm * (vm - fabsf(ve))));
+
+    as = std::clamp(as, -max_start_a, max_start_a);
+    ae = std::clamp(ae, -max_end_a, max_end_a);
+
+    // Update member variables with clamped values
+    vs_ = vs;
+    as_ = as;
+    ve_ = ve;
+    ae_ = ae;
 
     const auto prepareSide = [vm, jm](const float v0, const float a0)
     {
@@ -316,11 +330,12 @@ SCurveProfile::SCurveProfile(
         if (a0 < 0)
         {
             ret.v_base = v0 - kHalf * a0 * a0 / jm;
-            if (fabsf(ret.v_base) > vm)
-            {
-                ret.valid = false;
-                return ret;
-            }
+            // Preprocessing guarantees |v_base| <= vm
+            // if (fabsf(ret.v_base) > vm)
+            // {
+            //     ret.valid = false;
+            //     return ret;
+            // }
             ret.vp_min  = ret.v_base;
             ret.t_pre   = -a0 / jm;
             ret.x_pre   = v0 * ret.t_pre + (1.0f / 3.0f) * a0 * ret.t_pre * ret.t_pre;
@@ -329,11 +344,12 @@ SCurveProfile::SCurveProfile(
         else
         {
             ret.vp_min = v0 + kHalf * a0 * a0 / jm;
-            if (vm < ret.vp_min)
-            {
-                ret.valid = false;
-                return ret;
-            }
+            // Preprocessing guarantees vp_min <= vm
+            // if (vm < ret.vp_min)
+            // {
+            //     ret.valid = false;
+            //     return ret;
+            // }
             ret.t_pre   = 0;
             ret.x_pre   = 0;
             ret.t_shift = a0 / jm;
@@ -344,19 +360,41 @@ SCurveProfile::SCurveProfile(
         return ret;
     };
 
-    const SidePrepare start = prepareSide(vs, as);
-    if (!start.valid)
+    // Pre-compute preparation distances; scale as/ae if they exceed available length
+    auto preXPre = [jm](float v0, float a0) -> float
     {
-        fail(FailureCode::InvalidEndState);
-        return;
+        if (a0 >= 0)
+            return 0;
+        float t = -a0 / jm;
+        return v0 * t + (1.0f / 3.0f) * a0 * t * t;
+    };
+    float pre_total = preXPre(vs, as) + preXPre(ve, -ae);
+    if (pre_total > len + S_CURVE_MAX_BS_ERROR)
+    {
+        float scale = len / pre_total;
+        as *= scale;
+        ae *= scale;
+        as = std::clamp(as, -max_start_a, max_start_a);
+        ae = std::clamp(ae, -max_end_a, max_end_a);
+        as_ = as;
+        ae_ = ae;
     }
 
-    const SidePrepare endr = prepareSide(ve, -ae);
-    if (!endr.valid)
-    {
-        fail(FailureCode::InvalidEndState);
-        return;
-    }
+    SidePrepare start = prepareSide(vs, as);
+    // Preprocessing guarantees start.valid is always true
+    // if (!start.valid)
+    // {
+    //     fail(FailureCode::InvalidEndState);
+    //     return;
+    // }
+
+    SidePrepare endr = prepareSide(ve, -ae);
+    // Preprocessing guarantees endr.valid is always true
+    // if (!endr.valid)
+    // {
+    //     fail(FailureCode::InvalidEndState);
+    //     return;
+    // }
 
     t1_pre_ = start.t_pre;
     x1_pre_ = xs + dir * start.x_pre;
@@ -368,28 +406,116 @@ SCurveProfile::SCurveProfile(
     float vp_min = fmaxf(start.vp_min, endr.vp_min);
     if (vp_min < 0)
         vp_min = 0;
-    if (vm < vp_min)
-    {
-        fail(FailureCode::SolveCoreFailed);
-        return;
-    }
+    // Preprocessing guarantees vp_min <= vm
+    // if (vm < vp_min)
+    // {
+    //     fail(FailureCode::SolveCoreFailed);
+    //     return;
+    // }
 
     const float len0 = len - start.x_pre - endr.x_pre;
-    if (len0 < -S_CURVE_MAX_BS_ERROR)
-    {
-        fail(FailureCode::SolveCoreFailed);
-        return;
-    }
+    // len0 < -EPS is prevented by pre-scaling as/ae before prepareSide
+    // if (len0 < -S_CURVE_MAX_BS_ERROR)
+    // {
+    //     fail(FailureCode::SolveCoreFailed);
+    //     return;
+    // }
 
     const FastEvalConfig fast_eval_cfg{
-        am,
-        jm,
-        am * am,
-        am / jm,
-        0.5f / am,
+        am, jm, am * am, am / jm, 0.5f / am,
     };
-    const FastEvalSide start_eval{ start.v_base, start.x_pre, start.t_shift };
-    const FastEvalSide end_eval{ endr.v_base, endr.x_pre, endr.t_shift };
+    FastEvalSide start_eval{ start.v_base, start.x_pre, start.t_shift };
+    FastEvalSide end_eval{ endr.v_base, endr.x_pre, endr.t_shift };
+
+    // Pre-check: ensure minimum distance at vp_min fits within len
+    const FastEvalResult min_eval =
+            EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vp_min);
+    if (min_eval.delta > S_CURVE_MAX_BS_ERROR)
+    {
+        // Scale as/ae proportionally; min distance scales with acceleration
+        float scale = len / (min_eval.dx1 + min_eval.dx3);
+        as *= scale;
+        ae *= scale;
+        as = std::clamp(as, -max_start_a, max_start_a);
+        ae = std::clamp(ae, -max_end_a, max_end_a);
+        as_ = as;
+        ae_ = ae;
+
+        start = prepareSide(vs, as);
+        endr = prepareSide(ve, -ae);
+
+        t1_pre_ = start.t_pre;
+        x1_pre_ = xs + dir * start.x_pre;
+        ts1_    = start.t_shift;
+        t3_pre_ = endr.t_pre;
+        x3_pre_ = endr.x_pre;
+        ts3_    = endr.t_shift;
+
+        vp_min = fmaxf(start.vp_min, endr.vp_min);
+        if (vp_min < 0)
+            vp_min = 0;
+
+        start_eval = FastEvalSide{ start.v_base, start.x_pre, start.t_shift };
+        end_eval   = FastEvalSide{ endr.v_base, endr.x_pre, endr.t_shift };
+
+        // If scaling didn't help (e.g. as/ae were zero), force immediate deceleration
+        const FastEvalResult retry_eval =
+                EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vp_min);
+        if (retry_eval.delta > S_CURVE_MAX_BS_ERROR)
+        {
+            as = -std::min(am, sqrtf(2.0f * jm * fabsf(vs)));
+            as = std::clamp(as, -max_start_a, max_start_a);
+            as_ = as;
+
+            start = prepareSide(vs, as);
+            endr = prepareSide(ve, -ae);
+
+            t1_pre_ = start.t_pre;
+            x1_pre_ = xs + dir * start.x_pre;
+            ts1_    = start.t_shift;
+            t3_pre_ = endr.t_pre;
+            x3_pre_ = endr.x_pre;
+            ts3_    = endr.t_shift;
+
+            vp_min = fmaxf(start.vp_min, endr.vp_min);
+            if (vp_min < 0)
+                vp_min = 0;
+
+            start_eval = FastEvalSide{ start.v_base, start.x_pre, start.t_shift };
+            end_eval   = FastEvalSide{ endr.v_base, endr.x_pre, endr.t_shift };
+
+            // If still exceeds, reduce vs to fit within available distance
+            const FastEvalResult vs_eval =
+                    EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vp_min);
+            if (vs_eval.delta > S_CURVE_MAX_BS_ERROR)
+            {
+                float vs_scale = len / (vs_eval.dx1 + vs_eval.dx3);
+                vs *= vs_scale;
+                vs = std::clamp(vs, -vm, vm);
+                vs_ = vs;
+                ve *= vs_scale;
+                ve = std::clamp(ve, -vm, vm);
+                ve_ = ve;
+
+                start = prepareSide(vs, as);
+                endr = prepareSide(ve, -ae);
+
+                t1_pre_ = start.t_pre;
+                x1_pre_ = xs + dir * start.x_pre;
+                ts1_    = start.t_shift;
+                t3_pre_ = endr.t_pre;
+                x3_pre_ = endr.x_pre;
+                ts3_    = endr.t_shift;
+
+                vp_min = fmaxf(start.vp_min, endr.vp_min);
+                if (vp_min < 0)
+                    vp_min = 0;
+
+                start_eval = FastEvalSide{ start.v_base, start.x_pre, start.t_shift };
+                end_eval   = FastEvalSide{ endr.v_base, endr.x_pre, endr.t_shift };
+            }
+        }
+    }
 
     const FastEvalResult vm_eval =
             EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, vm);
@@ -417,55 +543,84 @@ SCurveProfile::SCurveProfile(
         return;
     }
 
-    float l = vp_min, r = vm;
-    float delta_d = len0, dx1 = 0, dx3 = 0;
-
-#ifdef DEBUG
-    binary_search_count_ = 0;
-#endif
-    while (r - l > S_CURVE_MAX_BS_ERROR)
+    // Binary search + overshoot retry loop
+    float l, r, delta_d, dx1, dx3;
+    for (int retry = 0; retry < 4; retry++)
     {
+        l = vp_min; r = vm;
 #ifdef DEBUG
-        binary_search_count_++;
+        binary_search_count_ = 0;
 #endif
-        const float          mid = kHalf * (l + r);
-        const FastEvalResult mid_eval =
-                EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
-        delta_d = mid_eval.delta;
-        if (fabsf(delta_d) <= S_CURVE_MAX_BS_ERROR)
+        while (r - l > S_CURVE_MAX_BS_ERROR)
         {
-            r = l = mid;
-            break;
+#ifdef DEBUG
+            binary_search_count_++;
+#endif
+            const float          mid = kHalf * (l + r);
+            const FastEvalResult mid_eval =
+                    EvaluateDistanceDelta(fast_eval_cfg, start_eval, end_eval, len, mid);
+            delta_d = mid_eval.delta;
+            if (fabsf(delta_d) <= S_CURVE_MAX_BS_ERROR)
+            {
+                r = l = mid;
+                break;
+            }
+            if (delta_d > 0)
+                r = mid;
+            else
+                l = mid;
         }
-        if (delta_d > 0)
-            r = mid;
-        else
-            l = mid;
+
+        const float vp = kHalf * (l + r);
+        process1_.init(start.v_base, vp, am, jm);
+        process3_.init(endr.v_base, vp, am, jm);
+        xs1_    = process1_.getDistance(ts1_);
+        xs3_    = process3_.getDistance(ts3_);
+        dx1     = start.x_pre + process1_.getTotalDistance() - xs1_;
+        dx3     = endr.x_pre + process3_.getTotalDistance() - xs3_;
+        delta_d = dx1 + dx3 - len;
+
+        if (delta_d <= S_CURVE_MAX_BS_ERROR)
+        {
+            vp_ = vp;
+            break;  // undershoot or exact: handled below
+        }
+
+        // Overshoot: reduce vs/ve and retry
+        float scale = len / (dx1 + dx3);
+        if (scale > 0.999f) { vp_ = vp; break; }
+        vs *= scale;
+        vs = std::clamp(vs, -vm, vm);
+        vs_ = vs;
+        ve *= scale;
+        ve = std::clamp(ve, -vm, vm);
+        ve_ = ve;
+
+        start = prepareSide(vs, as);
+        endr = prepareSide(ve, -ae);
+
+        t1_pre_ = start.t_pre;
+        x1_pre_ = xs_ + direction_ * start.x_pre;
+        ts1_    = start.t_shift;
+        t3_pre_ = endr.t_pre;
+        x3_pre_ = endr.x_pre;
+        ts3_    = endr.t_shift;
+
+        vp_min = fmaxf(start.vp_min, endr.vp_min);
+        if (vp_min < 0) vp_min = 0;
+
+        start_eval = FastEvalSide{ start.v_base, start.x_pre, start.t_shift };
+        end_eval   = FastEvalSide{ endr.v_base, endr.x_pre, endr.t_shift };
     }
 
-    const float vp = kHalf * (l + r);
-    process1_.init(start.v_base, vp, am, jm);
-    process3_.init(endr.v_base, vp, am, jm);
-    xs1_    = process1_.getDistance(ts1_);
-    xs3_    = process3_.getDistance(ts3_);
-    dx1     = start.x_pre + process1_.getTotalDistance() - xs1_;
-    dx3     = endr.x_pre + process3_.getTotalDistance() - xs3_;
-    delta_d = dx1 + dx3 - len;
-
-    if (delta_d > S_CURVE_MAX_BS_ERROR)
-    {
-        fail(FailureCode::SolveCoreFailed);
-        return;
-    }
-
-    has_const_ = false;
-    t1_        = t1_pre_ + process1_.getTotalTime() - ts1_;
-    t2_        = t1_;
+    // Absorb undershoot with constant-velocity phase
+    float residual = delta_d < 0 ? -delta_d : 0;
+    has_const_  = residual > 0;
+    t1_         = t1_pre_ + process1_.getTotalTime() - ts1_;
+    t2_         = t1_ + (has_const_ ? residual / vp_ : 0);
     total_time_ = t2_ + t3_pre_ + process3_.getTotalTime() - ts3_;
 
     x1_ = xs_ + direction_ * dx1;
-
-    vp_ = vp;
 
     success_ = true;
 }

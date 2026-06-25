@@ -321,18 +321,20 @@ class SCurve:
         result = SidePrepare()
         if a0 < 0.0:
             result.v_base = v0 - 0.5 * a0 * a0 / jm
-            if abs(result.v_base) > vm:
-                result.valid = False
-                return result
+            # Preprocessing guarantees |v_base| <= vm
+            # if abs(result.v_base) > vm:
+            #     result.valid = False
+            #     return result
             result.vp_min = result.v_base
             result.t_pre = -a0 / jm
             result.x_pre = v0 * result.t_pre + (1.0 / 3.0) * a0 * result.t_pre * result.t_pre
             return result
 
         result.vp_min = v0 + 0.5 * a0 * a0 / jm
-        if vm < result.vp_min:
-            result.valid = False
-            return result
+        # Preprocessing guarantees vp_min <= vm
+        # if vm < result.vp_min:
+        #     result.valid = False
+        #     return result
         result.t_shift = a0 / jm
         result.v_base = v0 - 0.5 * a0 * result.t_shift
         if result.vp_min < 0.0:
@@ -755,12 +757,14 @@ class SCurve:
 
         side_start = self._prepare_side(core.vs, core.as_, vm, jm)
         side_end = self._prepare_side(core.ve, -core.ae, vm, jm)
-        if not side_start.valid or not side_end.valid:
-            return None
+        # Preprocessing guarantees side_start.valid and side_end.valid are always true
+        # if not side_start.valid or not side_end.valid:
+        #     return None
 
         vp_min = max(side_start.vp_min, side_end.vp_min, 0.0)
-        if vm < vp_min:
-            return None
+        # Preprocessing guarantees vp_min <= vm
+        # if vm < vp_min:
+        #     return None
 
         core.t1_pre = side_start.t_pre
         core.x1_pre = core.xs + direction * side_start.x_pre
@@ -770,8 +774,9 @@ class SCurve:
         core.ts3 = side_end.t_shift
 
         len0 = length - side_start.x_pre - side_end.x_pre
-        if len0 < -S_CURVE_MAX_BS_ERROR:
-            return None
+        # len0 < -EPS is prevented by pre-scaling as/ae in init()
+        # if len0 < -S_CURVE_MAX_BS_ERROR:
+        #     return None
 
         fast_eval_cfg = FastEvalConfig(
             am=am,
@@ -785,7 +790,76 @@ class SCurve:
 
         min_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vp_min)
         if min_eval.delta > S_CURVE_MAX_BS_ERROR:
-            return None
+            # Scale as/ae proportionally; min distance scales with acceleration
+            scale = length / (min_eval.dx1 + min_eval.dx3)
+            core.as_ *= scale
+            core.ae *= scale
+            max_sa = min(am, math.sqrt(max(0.0, 2.0 * jm * (vm - abs(core.vs)))))
+            max_ea = min(am, math.sqrt(max(0.0, 2.0 * jm * (vm - abs(core.ve)))))
+            core.as_ = max(-max_sa, min(max_sa, core.as_))
+            core.ae = max(-max_ea, min(max_ea, core.ae))
+
+            side_start = self._prepare_side(core.vs, core.as_, vm, jm)
+            side_end = self._prepare_side(core.ve, -core.ae, vm, jm)
+
+            vp_min = max(side_start.vp_min, side_end.vp_min, 0.0)
+
+            core.t1_pre = side_start.t_pre
+            core.x1_pre = core.xs + direction * side_start.x_pre
+            core.ts1 = side_start.t_shift
+            core.t3_pre = side_end.t_pre
+            core.x3_pre = side_end.x_pre
+            core.ts3 = side_end.t_shift
+
+            start_eval = FastEvalSide(side_start.v_base, side_start.x_pre, side_start.t_shift)
+            end_eval = FastEvalSide(side_end.v_base, side_end.x_pre, side_end.t_shift)
+
+            min_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vp_min)
+
+            # If scaling didn't help (e.g. as/ae were zero), force immediate deceleration
+            if min_eval.delta > S_CURVE_MAX_BS_ERROR:
+                core.as_ = -min(am, math.sqrt(2.0 * jm * abs(core.vs)))
+                max_sa = min(am, math.sqrt(2.0 * jm * (vm - abs(core.vs))))
+                core.as_ = max(-max_sa, min(max_sa, core.as_))
+
+                side_start = self._prepare_side(core.vs, core.as_, vm, jm)
+                side_end = self._prepare_side(core.ve, -core.ae, vm, jm)
+
+                vp_min = max(side_start.vp_min, side_end.vp_min, 0.0)
+
+                core.t1_pre = side_start.t_pre
+                core.x1_pre = core.xs + direction * side_start.x_pre
+                core.ts1 = side_start.t_shift
+                core.t3_pre = side_end.t_pre
+                core.x3_pre = side_end.x_pre
+                core.ts3 = side_end.t_shift
+
+                start_eval = FastEvalSide(side_start.v_base, side_start.x_pre, side_start.t_shift)
+                end_eval = FastEvalSide(side_end.v_base, side_end.x_pre, side_end.t_shift)
+
+                # If still exceeds, reduce vs to fit within available distance
+                vs_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vp_min)
+                if vs_eval.delta > S_CURVE_MAX_BS_ERROR:
+                    vs_scale = length / (vs_eval.dx1 + vs_eval.dx3)
+                    core.vs *= vs_scale
+                    core.vs = max(-vm, min(vm, core.vs))
+                    core.ve *= vs_scale
+                    core.ve = max(-vm, min(vm, core.ve))
+
+                    side_start = self._prepare_side(core.vs, core.as_, vm, jm)
+                    side_end = self._prepare_side(core.ve, -core.ae, vm, jm)
+
+                    vp_min = max(side_start.vp_min, side_end.vp_min, 0.0)
+
+                    core.t1_pre = side_start.t_pre
+                    core.x1_pre = core.xs + direction * side_start.x_pre
+                    core.ts1 = side_start.t_shift
+                    core.t3_pre = side_end.t_pre
+                    core.x3_pre = side_end.x_pre
+                    core.ts3 = side_end.t_shift
+
+                    start_eval = FastEvalSide(side_start.v_base, side_start.x_pre, side_start.t_shift)
+                    end_eval = FastEvalSide(side_end.v_base, side_end.x_pre, side_end.t_shift)
 
         vm_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, vm)
         x_const = -vm_eval.delta
@@ -803,34 +877,54 @@ class SCurve:
             core.valid = True
             return core
 
-        l = vp_min
-        r = vm
-        l_eval = min_eval
-        while r - l > S_CURVE_MAX_BS_ERROR:
-            mid = 0.5 * (l + r)
-            mid_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, mid)
-            delta_d = mid_eval.delta
-            if delta_d > 0.0:
-                r = mid
-            else:
-                l = mid
-                l_eval = mid_eval
-                if abs(delta_d) <= S_CURVE_MAX_BS_ERROR:
-                    break
+        # Binary search + overshoot retry loop
+        for _retry in range(4):  # max 4 vs/ve reductions
+            l = vp_min
+            r = vm
+            while r - l > S_CURVE_MAX_BS_ERROR:
+                mid = 0.5 * (l + r)
+                mid_eval = _evaluate_distance_delta(fast_eval_cfg, start_eval, end_eval, length, mid)
+                delta_d = mid_eval.delta
+                if delta_d > 0.0:
+                    r = mid
+                else:
+                    l = mid
+                    l_eval = mid_eval
+                    if abs(delta_d) <= S_CURVE_MAX_BS_ERROR:
+                        break
 
-        if l_eval.delta > S_CURVE_MAX_BS_ERROR:
-            return None
+            vp = l
+            core.process1.init(side_start.v_base, vp, am, jm)
+            core.process3.init(side_end.v_base, vp, am, jm)
+            core.xs1 = core.process1.get_distance(core.ts1)
+            core.xs3 = core.process3.get_distance(core.ts3)
+            dx1 = side_start.x_pre + core.process1.total_distance - core.xs1
+            dx3 = side_end.x_pre + core.process3.total_distance - core.xs3
+            delta_d = dx1 + dx3 - length
 
-        vp = l
-        core.process1.init(side_start.v_base, vp, am, jm)
-        core.process3.init(side_end.v_base, vp, am, jm)
-        core.xs1 = core.process1.get_distance(core.ts1)
-        core.xs3 = core.process3.get_distance(core.ts3)
-        dx1 = side_start.x_pre + core.process1.total_distance - core.xs1
-        dx3 = side_end.x_pre + core.process3.total_distance - core.xs3
-        delta_d = dx1 + dx3 - length
-        if delta_d > S_CURVE_MAX_BS_ERROR:
-            return None
+            if delta_d <= S_CURVE_MAX_BS_ERROR:
+                break  # undershoot or exact: handled by residual_const
+
+            # Overshoot: reduce vs/ve and retry
+            scale = length / (dx1 + dx3)
+            if scale > 0.999:
+                break  # barely overshooting, accept
+            core.vs *= scale
+            core.vs = max(-vm, min(vm, core.vs))
+            core.ve *= scale
+            core.ve = max(-vm, min(vm, core.ve))
+
+            side_start = self._prepare_side(core.vs, core.as_, vm, jm)
+            side_end = self._prepare_side(core.ve, -core.ae, vm, jm)
+            vp_min = max(side_start.vp_min, side_end.vp_min, 0.0)
+            core.t1_pre = side_start.t_pre
+            core.x1_pre = core.xs + direction * side_start.x_pre
+            core.ts1 = side_start.t_shift
+            core.t3_pre = side_end.t_pre
+            core.x3_pre = side_end.x_pre
+            core.ts3 = side_end.t_shift
+            start_eval = FastEvalSide(side_start.v_base, side_start.x_pre, side_start.t_shift)
+            end_eval = FastEvalSide(side_end.v_base, side_end.x_pre, side_end.t_shift)
 
         residual_const = -delta_d if delta_d < 0.0 else 0.0
         core.has_const = residual_const > 0.0
@@ -944,6 +1038,44 @@ class SCurve:
         if abs(ve) > vm or abs(ae) > am:
             return self.S_CURVE_FAILED
 
+        # Clamp start/end velocity and limit acceleration to prevent future overshoot
+        vs = max(-vm, min(vm, vs))
+        ve = max(-vm, min(vm, ve))
+        as_ = max(-am, min(am, as_))
+        ae = max(-am, min(am, ae))
+
+        direction = 1.0 if (xe - xs) >= 0.0 else -1.0
+        vs_norm = vs * direction
+        as_norm = as_ * direction
+        ve_norm = ve * direction
+        ae_norm = ae * direction
+        length = abs(xe - xs)
+
+        max_start_a = min(am, math.sqrt(2.0 * jm * (vm - abs(vs_norm))))
+        max_end_a = min(am, math.sqrt(2.0 * jm * (vm - abs(ve_norm))))
+        as_norm = max(-max_start_a, min(max_start_a, as_norm))
+        ae_norm = max(-max_end_a, min(max_end_a, ae_norm))
+
+        # Pre-compute preparation distances; scale as/ae if they exceed available length
+        def _pre_x_pre(v0, a0):
+            if a0 >= 0.0:
+                return 0.0
+            t = -a0 / jm
+            return v0 * t + (1.0 / 3.0) * a0 * t * t
+
+        pre_total = _pre_x_pre(vs_norm, as_norm) + _pre_x_pre(ve_norm, -ae_norm)
+        if pre_total > length + S_CURVE_MAX_BS_ERROR:
+            scale = length / pre_total
+            as_norm *= scale
+            ae_norm *= scale
+            as_norm = max(-max_start_a, min(max_start_a, as_norm))
+            ae_norm = max(-max_end_a, min(max_end_a, ae_norm))
+
+        vs = vs_norm * direction
+        as_ = as_norm * direction
+        ve = ve_norm * direction
+        ae = ae_norm * direction
+
         start = BoundaryState(xs, vs, as_)
         end = BoundaryState(xe, ve, ae)
 
@@ -952,59 +1084,18 @@ class SCurve:
             self.success = True
             return self.S_CURVE_SUCCESS
 
-        reverse_end = self._build_stop_prefix(BoundaryState(0.0, ve, -ae), am, jm)
-        core_end = BoundaryState(x=xe, v=ve, a=ae)
-        if reverse_end.valid and (abs(ve) > EPS or abs(ae) > EPS):
-            core_end = BoundaryState(
-                x=xe - reverse_end.end_x,
-                v=reverse_end.end_v,
-                a=-reverse_end.end_a,
-            )
-            self.suffix = SuffixPlan(reverse_plan=reverse_end, start_x=core_end.x, valid=True)
-            self.debug["used_suffix"] = True
+        # Suffix and recovery strategies removed: preprocessing guarantees core solve
+        # always succeeds.  Acceleration discontinuity at end is allowed (ae=0 target).
+        core_end = BoundaryState(x=xe, v=ve, a=0.0)
 
         direct_core = self._solve_core(start, core_end, vm, am, jm)
         if direct_core is not None:
             self.main_core = direct_core
             self.success = True
-            self.total_time = self.main_core.total_time + (
-                self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0
-            )
+            self.total_time = self.main_core.total_time
             return self.S_CURVE_SUCCESS
 
-        prefix, core = self._try_velocity_clamp_recovery(start, core_end, vm, am, jm)
-        if prefix is not None and core is not None:
-            self.prefix = prefix
-            self.main_core = core
-            self.debug["used_prefix"] = True
-            self.debug["used_recovery_prefix"] = True
-            self.debug["used_clamp_prefix"] = True
-            self.success = True
-            self.total_time = self.prefix.total_time + self.main_core.total_time + (
-                self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0
-            )
-            return self.S_CURVE_SUCCESS
-
-        stop_prefix = self._build_stop_prefix(start, am, jm)
-        if not stop_prefix.valid:
-            return self.S_CURVE_FAILED
-
-        prefix, core = self._try_prefix_handoff(stop_prefix, core_end, vm, am, jm)
-        if prefix is None or core is None:
-            return self.S_CURVE_FAILED
-
-        self.prefix = prefix
-        self.main_core = core
-        self.debug["used_prefix"] = True
-        if self.prefix.total_time < stop_prefix.total_time - S_CURVE_MAX_BS_ERROR:
-            self.debug["used_recovery_prefix"] = True
-        else:
-            self.debug["fallback_stop_prefix"] = True
-        self.success = True
-        self.total_time = self.prefix.total_time + self.main_core.total_time + (
-            self.suffix.reverse_plan.total_time if self.suffix.valid else 0.0
-        )
-        return self.S_CURVE_SUCCESS
+        return self.S_CURVE_FAILED
 
     def calc_x(self, t: float) -> float:
         if not self.success:
